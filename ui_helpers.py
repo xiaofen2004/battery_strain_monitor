@@ -45,7 +45,7 @@ def _configure_checkbutton_indicator(root, style, px):
     checked = indicator("#2563eb", "#2563eb", "#ffffff")
     disabled_unchecked = indicator("#f1f5f9", "#cbd5e1")
     disabled_checked = indicator("#a6b8df", "#a6b8df", "#ffffff")
-    root._checkbutton_images = (unchecked, checked, disabled_unchecked, disabled_checked)
+    root.checkbutton_images = (unchecked, checked, disabled_unchecked, disabled_checked)
     style.element_create("Tick.indicator", "image", unchecked,
                          ("disabled", "selected", disabled_checked),
                          ("disabled", disabled_unchecked), ("selected", checked))

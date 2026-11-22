@@ -60,9 +60,14 @@ def draw_summary(figure, data, selection, time_axis, layout):
         for index, (name, series) in enumerate(values.items()):
             t, y = battery_line(time, series) if key == "battery" else (time, series)
             t, y = display_points(t, y)
-            marker = "." if key == "temperature" or np.isfinite(y).sum() == 1 else None
+            marker, markevery = ".", None
+            if key != "temperature":
+                finite = np.isfinite(y)
+                isolated = finite & ~np.r_[False, finite[:-1]] & ~np.r_[finite[1:], False]
+                markevery = np.flatnonzero(isolated).tolist()
+                marker = "." if markevery else None
             line, = axis.plot((t - origin) / scale, y, label=name, color=colors[index],
-                              linewidth=1.1, marker=marker, markersize=3, zorder=3)
+                              linewidth=1.1, marker=marker, markersize=3, markevery=markevery, zorder=3)
             curves.append(line)
         series_count += 1
 

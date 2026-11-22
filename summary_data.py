@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from data_io import BatteryReader, StrainReader, check_cancel, snapshot
-from processing import make_plot_data
+from processing import infer_rate, make_plot_data
 
 
 @dataclass
@@ -34,6 +34,7 @@ class SummaryData:
     steps: list[WorkStep]
     strain_label: str
     battery_clock_rebuilt: bool = False
+    strain_rate_note: str = ""
 
 
 def _local_clock_seconds(value):
@@ -147,11 +148,21 @@ def load_summary(paths, strain_settings=None, temperature_start="", progress=lam
     traces = {}
     steps = []
     strain_label = "应变 / με"
+    strain_rate_note = ""
     battery_clock_rebuilt = False
     if "strain" in paths:
         cfg = replace(strain_settings, include_battery=False)
         reader = StrainReader(paths["strain"], cfg.selected_channels)
         absolute, raw = reader.update(progress, cancel)
+        if cfg.strain_hz:
+            try:
+                detected, _ = infer_rate(absolute)
+            except ValueError:
+                pass
+            else:
+                if abs(cfg.strain_hz - detected) / detected > .25:
+                    strain_rate_note = f"应变按文件时间戳 {detected:g} Hz 处理（原设 {cfg.strain_hz:g} Hz）"
+                    cfg = replace(cfg, strain_hz=detected)
         progress("处理应变通道")
         data = make_plot_data(absolute, raw, None, cfg, cancel)
         traces["strain"] = Trace(data.strain_t + data.origin, data.strains)
@@ -171,7 +182,7 @@ def load_summary(paths, strain_settings=None, temperature_start="", progress=lam
     origin = max(float(trace.time[0]) for trace in traces.values())
     if origin > min(float(trace.time[-1]) for trace in traces.values()):
         raise ValueError("所选文件的绝对时间没有共同区间，请核对实验日期和时间。")
-    return SummaryData(origin, traces, steps, strain_label, battery_clock_rebuilt)
+    return SummaryData(origin, traces, steps, strain_label, battery_clock_rebuilt, strain_rate_note)
 
 
 def latest_temperature_file(folder):

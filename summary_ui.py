@@ -10,7 +10,7 @@ from matplotlib.figure import Figure
 
 from plotting import clock_text
 from summary_data import latest_temperature_file, load_summary
-from summary_plot import PLOT_LAYOUTS, TIME_AXES, draw_summary
+from summary_plot import PLOT_LAYOUTS, TIME_AXES, draw_summary, elapsed_clock
 from ui_helpers import ScrollArea
 from ui_layout import ChartToolbar
 
@@ -32,6 +32,8 @@ class SummaryPage:
         self.status = tk.StringVar(master=parent, value="选择已保存的数据文件，读取后可筛选电池工步。")
         self.defaults = {}
         self.data = None
+        self.checked_steps = set()
+        self.step_icons = parent.winfo_toplevel().checkbutton_images[:2]
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.draw_job = None
@@ -78,18 +80,21 @@ class SummaryPage:
             box = ttk.Combobox(options, textvariable=variable, values=values, width=13, state="readonly")
             box.grid(row=row, column=1, sticky="ew", pady=p(2))
             box.bind("<<ComboboxSelected>>", self._request_render)
-        ttk.Label(options, text="温度相对 0 秒的时刻（可选）", style="Muted.TLabel").grid(
+        ttk.Label(options, text="温度时间原点（可选）", style="Muted.TLabel").grid(
             row=3, column=0, sticky="w", padx=(0, p(8))
         )
         ttk.Entry(options, textvariable=self.temperature_start, width=19).grid(
             row=3, column=1, sticky="ew", pady=p(2)
         )
+        ttk.Label(options, text="仅用于只有相对秒数的旧温度 CSV", style="Muted.TLabel").grid(
+            row=4, column=1, sticky="w", pady=(p(2), 0)
+        )
         self.read_button = ttk.Button(options, text="读取并绘图", style="Primary.TButton", command=self.read_files)
-        self.read_button.grid(row=4, column=0, columnspan=2, sticky="e", pady=(p(5), 0))
+        self.read_button.grid(row=5, column=0, columnspan=2, sticky="e", pady=(p(5), 0))
 
         split = ttk.Panedwindow(outer, orient="horizontal")
         split.grid(row=1, column=0, sticky="nsew")
-        steps = ttk.Frame(split, style="Card.TFrame", padding=p(10), width=p(465))
+        steps = ttk.Frame(split, style="Card.TFrame", padding=p(10), width=p(570))
         chart = ttk.Frame(split, style="Card.TFrame", padding=p(8))
         split.add(steps, weight=0)
         split.add(chart, weight=1)
@@ -98,22 +103,25 @@ class SummaryPage:
         step_header = ttk.Frame(steps, style="Card.TFrame")
         step_header.grid(row=0, column=0, sticky="ew", pady=(0, p(5)))
         ttk.Label(step_header, text="电池工步", style="Section.TLabel").pack(side="left")
-        self.clear_button = ttk.Button(step_header, text="取消全选", command=self._clear_steps, state="disabled")
+        self.clear_button = ttk.Button(step_header, text="取消全选", command=lambda: self._set_all_steps(False), state="disabled")
         self.clear_button.pack(side="right")
-        self.all_button = ttk.Button(step_header, text="全选", command=self._select_steps, state="disabled")
+        self.all_button = ttk.Button(step_header, text="全选", command=lambda: self._set_all_steps(True), state="disabled")
         self.all_button.pack(side="right", padx=p(5))
-        ttk.Label(steps, text="点击工步切换选中状态。", style="Muted.TLabel").grid(
+        ttk.Label(steps, text="勾选要绘制的工步。时长按完整工步计算。", style="Muted.TLabel").grid(
             row=1, column=0, sticky="w", pady=(0, p(5))
         )
 
         ttk.Style(steps).configure("Summary.Treeview", rowheight=p(24))
-        self.steps = ttk.Treeview(steps, columns=("number", "kind", "start", "end"),
-                                  show="headings", selectmode="extended", style="Summary.Treeview")
+        self.steps = ttk.Treeview(steps, columns=("number", "kind", "start", "end", "duration"),
+                                  show="tree headings", selectmode="browse", style="Summary.Treeview")
+        self.steps.heading("#0", text="绘制")
+        self.steps.column("#0", width=p(42), minwidth=p(42), stretch=False)
         for key, heading, width in (("number", "序号", 41), ("kind", "工步类型", 103),
-                                     ("start", "开始时间", 148), ("end", "结束时间", 148)):
+                                     ("start", "开始时间", 148), ("end", "结束时间", 148),
+                                     ("duration", "时长", 68)):
             self.steps.heading(key, text=heading)
             self.steps.column(key, width=p(width), minwidth=p(width), stretch=False,
-                              anchor="center" if key == "number" else "w")
+                              anchor="center" if key in ("number", "duration") else "w")
         self.steps.grid(row=2, column=0, sticky="nsew")
         ybar = ttk.Scrollbar(steps, orient="vertical", command=self.steps.yview)
         xbar = ttk.Scrollbar(steps, orient="horizontal", command=self.steps.xview)
@@ -121,8 +129,8 @@ class SummaryPage:
         xbar.grid(row=3, column=0, sticky="ew")
         self.steps.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.steps.tag_configure("before", foreground="#8191a5")
-        self.steps.bind("<Button-1>", self._toggle_step)
-        self.steps.bind("<<TreeviewSelect>>", self._request_render)
+        self.steps.bind("<Button-1>", self._on_step_click)
+        self.steps.bind("<space>", self._on_step_space)
 
         chart.grid_propagate(False)
         chart.columnconfigure(0, weight=1)
@@ -214,29 +222,46 @@ class SummaryPage:
             for step in value.steps:
                 self.steps.insert("", "end", iid=str(step.number),
                                   values=(step.number, step.name, clock_text(step.start)[:19],
-                                          clock_text(step.last)[:19]),
+                                          clock_text(step.last)[:19], elapsed_clock(step.last - step.start)),
                                   tags=("before",) if step.last < value.origin else ())
             control_state = "normal" if value.steps else "disabled"
             self.all_button.configure(state=control_state)
             self.clear_button.configure(state=control_state)
-            self._select_steps()
-            self._request_render()
+            self._set_all_steps(True)
 
-    def _toggle_step(self, event):
-        if event.state & 0x5:  # Keep shift/control range selection.
+    def _on_step_click(self, event):
+        if self.steps.identify_region(event.x, event.y) != "tree":
+            return None
+        if self.steps.identify_column(event.x) != "#0":
             return None
         row = self.steps.identify_row(event.y)
-        if row and self.steps.identify_region(event.x, event.y) == "cell":
+        if row:
             self.steps.focus(row)
-            self.steps.selection_toggle(row)
-            return "break"
+            self.steps.focus_set()
+            return self._toggle_step(row)
         return None
 
-    def _select_steps(self):
-        self.steps.selection_set(self.steps.get_children())
+    def _on_step_space(self, _event):
+        return self._toggle_step(self.steps.focus())
 
-    def _clear_steps(self):
-        self.steps.selection_remove(self.steps.selection())
+    def _toggle_step(self, row):
+        if row:
+            number = int(row)
+            checked = number not in self.checked_steps
+            if checked:
+                self.checked_steps.add(number)
+            else:
+                self.checked_steps.remove(number)
+            self.steps.item(row, image=self.step_icons[checked])
+            self._request_render()
+        return "break"
+
+    def _set_all_steps(self, checked):
+        rows = self.steps.get_children()
+        self.checked_steps = {int(row) for row in rows} if checked else set()
+        for row in rows:
+            self.steps.item(row, image=self.step_icons[checked])
+        self._request_render()
 
     def _request_render(self, _event=None):
         if self.data is not None and self.draw_job is None:
@@ -244,7 +269,7 @@ class SummaryPage:
 
     def _render(self):
         self.draw_job = None
-        selected = {int(row) for row in self.steps.selection()}
+        selected = self.checked_steps
         drawn = draw_summary(self.figure, self.data, selected, self.time_axis.get(), self.layout.get())
         self.toolbar.update()
         self.canvas.draw_idle()
@@ -252,6 +277,8 @@ class SummaryPage:
         if self.data.steps:
             count = f"已选 {len(selected)} / {len(self.data.steps)} 个工步"
             start += f"  ·  {count}" if drawn else "  ·  所选工步无可绘制数据"
+        if self.data.strain_rate_note:
+            start += f"  ·  {self.data.strain_rate_note}"
         if self.data.battery_clock_rebuilt:
             start += "  ·  电池绝对时间有倒退，已按首条时间＋总时间重建"
         self.status.set(start)

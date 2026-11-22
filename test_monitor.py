@@ -226,7 +226,7 @@ class SummaryTests(unittest.TestCase):
                     lines.append(f"{absolute},{absolute},{20+i/10},{i-4}")
             temperature.write_text("\n".join(lines), encoding="utf-8-sig")
 
-            cfg = Settings(strain_hz=1, median_points=1, cutoff_hz=0)
+            cfg = Settings(strain_hz=100, median_points=1, cutoff_hz=0)
             summary = load_summary({"strain": strain, "battery": battery, "temperature": temperature}, cfg)
             epoch = parse_times([at(0)])[0]
             self.assertEqual(summary.origin, epoch + 4)
@@ -235,6 +235,8 @@ class SummaryTests(unittest.TestCase):
             self.assertEqual([step.start - epoch for step in summary.steps], [1, 6, 10, 15])
             complete, _ = visible_traces(summary, {1, 2, 3, 4})
             self.assertEqual(complete["strain"].time[0], epoch + 4)
+            self.assertIn("1 Hz", summary.strain_rate_note)
+            self.assertTrue(np.isfinite(complete["strain"].values["CH05"]).all())
             self.assertTrue(np.isnan(complete["temperature"].values["CVD 温度"]).any())
             filtered, selected = visible_traces(summary, {1, 3})
             self.assertEqual([step.number for step in selected], [1, 3])
@@ -254,6 +256,22 @@ class SummaryTests(unittest.TestCase):
             temp_only = load_summary({"temperature": temperature})
             self.assertTrue(draw_summary(figure, temp_only, set(), "相对时间", "同图叠加"))
             self.assertEqual(len(figure.axes[0].patches), 0)
+
+
+    def test_summary_shows_isolated_strain_points_without_connecting_gaps(self):
+        from matplotlib.figure import Figure
+        from summary_data import SummaryData, Trace
+        from summary_plot import draw_summary
+
+        trace = Trace(np.array([0., 1., 1., 2., 2.]),
+                      {"CH05": np.array([2., np.nan, 3., np.nan, 5.])})
+        data = SummaryData(0., {"strain": trace}, [], "应变 / με")
+        figure = Figure()
+        self.assertTrue(draw_summary(figure, data, set(), "s", "分开绘制"))
+        line = figure.axes[0].lines[0]
+        self.assertEqual(line.get_marker(), ".")
+        self.assertEqual(line.get_markevery(), [0, 2, 4])
+        self.assertTrue(np.isnan(line.get_ydata()[1]))
 
     def test_temperature_legacy_relative_seconds_require_real_start(self):
         from data_io import parse_times
