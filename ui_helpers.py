@@ -3,6 +3,7 @@ import ctypes
 import os
 import tkinter as tk
 from tkinter import ttk
+from PIL import Image, ImageDraw, ImageTk
 
 
 def enable_high_dpi():
@@ -21,6 +22,41 @@ def enable_high_dpi():
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except (AttributeError, OSError):
         pass
+
+
+def _configure_checkbutton_indicator(root, style, px):
+    size = px(14)
+    width = size + px(5)
+    resolution = 4
+
+    def indicator(fill, border, tick=None):
+        side = size * resolution
+        image = Image.new("RGBA", (width * resolution, side))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((0, 0, side - 1, side - 1), radius=round(side * .13),
+                               fill=fill, outline=border, width=resolution)
+        if tick:
+            draw.line([(round(side * x), round(side * y))
+                       for x, y in ((.23, .52), (.42, .70), (.77, .32))],
+                      fill=tick, width=max(resolution, round(side * .13)), joint="curve")
+        return ImageTk.PhotoImage(image.resize((width, size), Image.Resampling.LANCZOS), master=root)
+
+    unchecked = indicator("#ffffff", "#a9bdd8")
+    checked = indicator("#2563eb", "#2563eb", "#ffffff")
+    disabled_unchecked = indicator("#f1f5f9", "#cbd5e1")
+    disabled_checked = indicator("#a6b8df", "#a6b8df", "#ffffff")
+    root._checkbutton_images = (unchecked, checked, disabled_unchecked, disabled_checked)
+    style.element_create("Tick.indicator", "image", unchecked,
+                         ("disabled", "selected", disabled_checked),
+                         ("disabled", disabled_unchecked), ("selected", checked))
+    style.layout("TCheckbutton", [
+        ("Checkbutton.padding", {"sticky": "nswe", "children": [
+            ("Tick.indicator", {"side": "left", "sticky": ""}),
+            ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+                ("Checkbutton.label", {"sticky": "nswe"}),
+            ]}),
+        ]}),
+    ])
 
 
 def apply_theme(root, scale):
@@ -54,12 +90,9 @@ def apply_theme(root, scale):
                     lightcolor="#d9e2ef", darkcolor="#d9e2ef", arrowsize=px(13), padding=px(5))
     style.map("TCombobox", fieldbackground=[("readonly", "#f8fafc"), ("disabled", "#f1f5f9")],
               foreground=[("disabled", "#a0aec0")], selectbackground=[("readonly", "#e6eefc")], selectforeground=[("readonly", "#1e293b")])
-    style.configure("TCheckbutton", background="white", padding=(0, px(4)), focusthickness=0,
-                    indicatorbackground="white", indicatorforeground="white", indicatorsize=px(14),
-                    upperbordercolor="#b8c6d9", lowerbordercolor="#b8c6d9")
-    style.map("TCheckbutton", background=[("active", "white")],
-              indicatorbackground=[("selected", "#2563eb"), ("active", "#eef3fb")],
-              upperbordercolor=[("selected", "#2563eb")], lowerbordercolor=[("selected", "#2563eb")])
+    style.configure("TCheckbutton", background="white", padding=(0, px(4)), focusthickness=0)
+    style.map("TCheckbutton", background=[("active", "white")])
+    _configure_checkbutton_indicator(root, style, px)
     style.configure("TNotebook", background="white", borderwidth=0, tabmargins=0)
     style.configure("TNotebook.Tab", padding=(px(12), px(8)), background="#edf2f7", foreground="#64748b")
     style.map("TNotebook.Tab", background=[("selected", "white")], foreground=[("selected", "#2563eb")],

@@ -503,31 +503,6 @@ class UGWHost:
         self._button(pair_buttons, "全选", self.select_all_r_pairs).pack(side=tk.LEFT, padx=(0, p(5)))
         self._button(pair_buttons, "清空", self.clear_r_pairs).pack(side=tk.LEFT)
 
-        ttk.Separator(panel).pack(fill=tk.X, pady=(p(6), p(3)))
-        storage = ttk.Frame(panel, style="Monitor.TFrame", padding=(p(4), p(4)))
-        storage.pack(fill=tk.X)
-        storage.columnconfigure(1, weight=1)
-        self.save_check = ttk.Checkbutton(
-            storage, text="保存超声 MAT", variable=self.save_var, style="Monitor.TCheckbutton"
-        )
-        self.save_check.grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(storage, textvariable=self.save_dir_var, width=13).grid(
-            row=0, column=1, sticky="ew", padx=p(5)
-        )
-        self._button(storage, "选择目录", self.choose_folder).grid(row=0, column=2)
-        auto = ttk.Frame(storage, style="Monitor.TFrame")
-        auto.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(p(6), 0))
-        self.auto_check = ttk.Checkbutton(
-            auto, text="启用自动采集", variable=self.auto_var,
-            command=self.update_auto, style="Monitor.TCheckbutton",
-        )
-        self.auto_check.pack(side=tk.LEFT)
-        ttk.Label(auto, text="周期 / s", style="Monitor.TLabel").pack(side=tk.LEFT, padx=(p(10), p(4)))
-        ttk.Entry(auto, textvariable=self.interval_var, width=7).pack(side=tk.LEFT)
-        ttk.Label(
-            storage, text="自动采集保存 MAT，R 模式按路径分别保存。", style="Monitor.Muted.TLabel",
-        ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(p(4), 0))
-
         for column, (label, variable) in enumerate((
             ("显示电压", self.plot_voltage_var), ("使用时间轴 / μs", self.time_axis_var),
         )):
@@ -588,6 +563,31 @@ class UGWHost:
         ttk.Label(power, textvariable=self.power_status_var, style="Monitor.Muted.TLabel").pack(
             side=tk.LEFT, padx=(p(7), 0)
         )
+        ttk.Separator(panel).pack(fill=tk.X, pady=(p(6), p(3)))
+        storage = ttk.Frame(panel, style="Monitor.TFrame", padding=(0, p(2)))
+        storage.pack(fill=tk.X)
+        storage.columnconfigure(1, weight=1)
+        self.save_check = ttk.Checkbutton(
+            storage, text="保存超声 MAT", variable=self.save_var, style="Monitor.TCheckbutton"
+        )
+        self.save_check.grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(storage, textvariable=self.save_dir_var, width=13).grid(
+            row=0, column=1, sticky="ew", padx=p(5)
+        )
+        self._button(storage, "选择目录", self.choose_folder).grid(row=0, column=2)
+        auto = ttk.Frame(storage, style="Monitor.TFrame")
+        auto.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(p(6), 0))
+        self.auto_check = ttk.Checkbutton(
+            auto, text="启用自动采集", variable=self.auto_var,
+            command=self.update_auto, style="Monitor.TCheckbutton",
+        )
+        self.auto_check.pack(side=tk.LEFT)
+        ttk.Label(auto, text="周期 / s", style="Monitor.TLabel").pack(side=tk.LEFT, padx=(p(10), p(4)))
+        ttk.Entry(auto, textvariable=self.interval_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(
+            storage, text="自动采集保存 MAT，R 模式按路径分别保存。", style="Monitor.Muted.TLabel",
+        ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(p(4), 0))
+
         actions = ttk.Frame(panel, style="Monitor.TFrame")
         actions.pack(fill=tk.X, pady=(p(6), p(3)))
         self.once_button = self._button(actions, "单轮采集", self.acquire_once, primary=True)
