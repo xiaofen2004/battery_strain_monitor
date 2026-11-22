@@ -87,7 +87,7 @@ class AppModeTests(unittest.TestCase):
             app.withdraw()
             try:
                 self.assertEqual(app.fields["channel"].get(), "CH17")
-                self.assertEqual(len(app.monitor_tabs.tabs()), 2)
+                self.assertEqual(len(app.monitor_tabs.tabs()), 3)
                 host = app.ugw
                 self.assertEqual(float(host.temp_interval_var.get()), 10)
                 self.assertEqual(float(host.interval_var.get()), 15)

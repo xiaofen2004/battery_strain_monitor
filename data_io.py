@@ -261,6 +261,28 @@ class BatteryData:
     stages: np.ndarray
     notes: list[str]
     rows: int
+    step_starts: np.ndarray | None = None
+    used_elapsed: bool = False
+
+
+def battery_step_starts(frame, stages):
+    """Return row indices of distinct work-step occurrences."""
+    starts = np.zeros(len(stages), dtype=bool)
+    starts[0] = True
+    starts[1:] = stages[1:] != stages[:-1]
+    for names in (("循环序号", "循环号", "循环编号"), ("工步序号", "工步号", "工步编号")):
+        column = next((name for name in names if name in frame), None)
+        if column is not None:
+            ids = frame[column].ffill()
+            starts[1:] |= (ids.notna() & ids.shift().notna() & ids.ne(ids.shift())).to_numpy()[1:]
+    if "工步开始结束标识" in frame:
+        marker = frame["工步开始结束标识"]
+        begins = pd.to_numeric(marker, errors="coerce").eq(0) | marker.astype(str).str.strip().isin(("开始", "start"))
+        starts |= (begins & ~begins.shift(fill_value=False)).to_numpy()
+    if "时间" in frame:
+        elapsed = pd.to_timedelta(frame["时间"].astype(str), errors="coerce").dt.total_seconds().to_numpy()
+        starts[1:] |= np.diff(elapsed) < 0
+    return np.flatnonzero(starts)
 
 
 class BatteryReader:
@@ -287,7 +309,7 @@ class BatteryReader:
                     check_cancel(cancel)
                 if not row or all(x is None for x in row):
                     continue
-                records.append(row)
+                records.append(tuple(row) + (None,) * (len(header) - len(row)))
             if not records:
                 raise ValueError("电池文件尚无数据。")
         frame = pd.DataFrame(records, columns=header)
@@ -297,12 +319,14 @@ class BatteryReader:
         positive = dif[dif > 0]
         interval = float(np.median(positive)) if len(positive) else float("nan")
         notes.append(f"电池表记录 {len(frame):,} 行，正时间间隔中位数 {interval:g} s；仪器标称 100 Hz")
-        if np.any(dif < 0):
+        backwards = np.any(dif < 0)
+        if backwards:
             notes.append(f"电池绝对时间存在 {int((dif < 0).sum())} 处倒退")
+        use_elapsed = "总时间" in frame and (mode == "auto" or (mode == "prefer_absolute" and backwards))
         if mode == "fixed":
             t = absolute[0] + np.arange(len(frame)) / 100
             notes.append("已强制每行按 100 Hz 重建时间；仅适用于每行确为一个采样点的文件")
-        elif mode == "auto" and "总时间" in frame:
+        elif use_elapsed:
             elapsed = pd.to_timedelta(frame["总时间"].astype(str), errors="coerce").dt.total_seconds().to_numpy()
             if not np.isfinite(elapsed).all() or np.any(np.diff(elapsed) < 0):
                 raise ValueError("总时间无效或倒退，请检查源文件或选择绝对时间模式。")
@@ -310,13 +334,14 @@ class BatteryReader:
             notes.append(f"电池采用首条绝对时间＋总时间；与原绝对时间最大偏差 {np.max(np.abs(t - absolute)):.3f} s")
         else:
             t = absolute
-            if np.any(dif < 0):
-                raise ValueError("电池绝对时间倒退；请选择自动模式以总时间建立连续时间轴。")
+            if backwards:
+                raise ValueError("电池绝对时间倒退；请核对表内时间或使用有效的总时间列。")
         voltage = pd.to_numeric(frame["电压(V)"], errors="coerce").to_numpy(float)
         current = pd.to_numeric(frame["电流(A)"], errors="coerce").to_numpy(float)
         if not (np.isfinite(voltage).all() and np.isfinite(current).all()):
             raise ValueError("电池电压/电流存在空值或非数值。")
         stages = frame["工步类型"].fillna("未知").astype(str).to_numpy()
-        self.data = BatteryData(t, voltage, current, stages, notes, len(frame))
+        self.data = BatteryData(t, voltage, current, stages, notes, len(frame),
+                                battery_step_starts(frame, stages), bool(use_elapsed))
         self.key = key
         return self.data

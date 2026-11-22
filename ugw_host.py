@@ -2595,7 +2595,7 @@ class UGWHost:
 
                     **result,
 
-                    "Elapsed_s": "",
+                    "Elapsed_s": 0.0,
 
                 }
 

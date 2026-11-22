@@ -183,5 +183,91 @@ class ReaderTests(unittest.TestCase):
         self.assertGreater(t[0], 1_700_000_000)
 
 
+
+class SummaryTests(unittest.TestCase):
+    def test_three_clocks_and_step_selection_use_real_intervals(self):
+        from datetime import datetime, timedelta
+        import openpyxl
+        from matplotlib.figure import Figure
+        from data_io import parse_times
+        from summary_data import load_summary, visible_traces
+        from summary_plot import draw_summary
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            start = datetime(2026, 11, 22, 12, 0, 0)
+
+            def at(seconds):
+                return start + timedelta(seconds=seconds)
+
+            strain = root / "strain.xls"
+            records = [f"{at(i).strftime('%y/%m/%d %H:%M:%S')}.000\t{700+i}" for i in range(20)]
+            strain.write_text("\tCH05-\n" + "\n".join(records) + "\n", encoding="utf-8")
+            battery = root / "battery.xlsx"
+            book = openpyxl.Workbook()
+            record = book.active
+            record.title = "record"
+            record.append(("绝对时间", "电压(V)", "电流(A)", "工步类型", "时间", "工步开始结束标识", "总时间"))
+            for seconds in range(1, 20):
+                first, kind = ((1, "搁置") if seconds < 6 else (6, "搁置") if seconds < 10
+                               else (10, "恒流放电") if seconds < 15 else (15, "恒流充电"))
+                absolute = at(1) if seconds == 3 else at(seconds)
+                record.append((absolute, 3.7, 0., kind, f"00:00:{seconds-first:02d}",
+                               0 if seconds == first else None, f"00:00:{seconds-1:02d}"))
+            book.save(battery)
+
+            temperature = root / "temperature.csv"
+            lines = ["PC_Time,ScheduledPC_Time,Temperature_CVD_C,Elapsed_s"]
+            for i in range(4, 19):
+                absolute = at(i).astimezone().isoformat()
+                if i == 7:
+                    lines.append(f",{absolute},,{i-4}")
+                else:
+                    lines.append(f"{absolute},{absolute},{20+i/10},{i-4}")
+            temperature.write_text("\n".join(lines), encoding="utf-8-sig")
+
+            cfg = Settings(strain_hz=1, median_points=1, cutoff_hz=0)
+            summary = load_summary({"strain": strain, "battery": battery, "temperature": temperature}, cfg)
+            epoch = parse_times([at(0)])[0]
+            self.assertEqual(summary.origin, epoch + 4)
+            self.assertTrue(summary.battery_clock_rebuilt)
+            self.assertEqual([step.name for step in summary.steps], ["搁置", "搁置", "恒流放电", "恒流充电"])
+            self.assertEqual([step.start - epoch for step in summary.steps], [1, 6, 10, 15])
+            complete, _ = visible_traces(summary, {1, 2, 3, 4})
+            self.assertEqual(complete["strain"].time[0], epoch + 4)
+            self.assertTrue(np.isnan(complete["temperature"].values["CVD 温度"]).any())
+            filtered, selected = visible_traces(summary, {1, 3})
+            self.assertEqual([step.number for step in selected], [1, 3])
+            for trace in filtered.values():
+                self.assertFalse(((trace.time > epoch + 5) & (trace.time < epoch + 10)).any())
+                self.assertTrue(any(np.isnan(values).any() for values in trace.values.values()))
+
+            figure = Figure()
+            self.assertTrue(draw_summary(figure, summary, {1, 3}, "h", "分开绘制"))
+            self.assertEqual(len(figure.axes), 4)
+            self.assertEqual(figure.axes[2].get_xlabel(), "与共同起点的时间差 / h")
+            self.assertEqual(len(figure.axes[2].patches), 2)
+            self.assertTrue(draw_summary(figure, summary, {1, 3}, "绝对时间", "同图叠加"))
+            self.assertEqual(len(figure.axes), 4)
+            self.assertEqual(figure.axes[0].get_xlabel(), "绝对时间")
+            self.assertFalse(draw_summary(figure, summary, set(), "min", "分开绘制"))
+            temp_only = load_summary({"temperature": temperature})
+            self.assertTrue(draw_summary(figure, temp_only, set(), "相对时间", "同图叠加"))
+            self.assertEqual(len(figure.axes[0].patches), 0)
+
+    def test_temperature_legacy_relative_seconds_require_real_start(self):
+        from data_io import parse_times
+        from summary_data import read_temperature
+
+        with tempfile.TemporaryDirectory() as folder:
+            file = Path(folder) / "old.csv"
+            file.write_text("Elapsed_s,Temperature_C\n2,21.5\n12,22.5\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "只有相对时间"):
+                read_temperature(file)
+            trace = read_temperature(file, "2026-11-22 12:00:00")
+            np.testing.assert_allclose(trace.time - parse_times(["2026-11-22 12:00:00"])[0], [2, 12])
+            np.testing.assert_allclose(trace.values["温度"], [21.5, 22.5])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

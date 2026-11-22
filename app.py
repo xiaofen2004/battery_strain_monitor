@@ -17,6 +17,7 @@ from exporting import export_frame
 from ui_helpers import ScrollArea, enable_high_dpi, apply_theme
 from ui_layout import build_ui
 from ugw_host import UGWHost
+from summary_ui import SummaryPage
 
 ROOT = Path(__file__).resolve().parent
 
@@ -62,8 +63,10 @@ class MonitorApp(tk.Tk):
         self.monitor_tabs.pack(fill="both", expand=True)
         strain_tab = ttk.Frame(self.monitor_tabs)
         serial_tab = ttk.Frame(self.monitor_tabs)
+        summary_tab = ttk.Frame(self.monitor_tabs)
         self.monitor_tabs.add(strain_tab, text="应变与电参数")
         self.monitor_tabs.add(serial_tab, text="温度与超声")
+        self.monitor_tabs.add(summary_tab, text="汇总绘图")
         build_ui(self, strain_tab)
 
         ugw_area = ScrollArea(serial_tab, lambda: self.ugw.minimum_size())
@@ -79,6 +82,19 @@ class MonitorApp(tk.Tk):
 
         ugw_area.bind("<Configure>", resize_acquisition, add="+")
         ugw_area.body.bind("<<MonitorLayoutChanged>>", resize_acquisition)
+        self.summary_page = SummaryPage(summary_tab, self.px, self._summary_locations, self._summary_strain_settings)
+        self.monitor_tabs.bind("<<NotebookTabChanged>>", self._tab_changed)
+
+    def _tab_changed(self, _event):
+        if self.monitor_tabs.select() == str(self.summary_page.parent):
+            self.summary_page.sync_sources()
+
+    def _summary_locations(self):
+        return (self.fields["strain_file"].get().strip(), self.fields["battery_file"].get().strip(),
+                self.ugw.temp_save_dir_var.get().strip())
+
+    def _summary_strain_settings(self):
+        return self._strain_config({key: variable.get().strip() for key, variable in self.fields.items()})
 
     def _browse(self, name):
         path = filedialog.askopenfilename(title="选择" + ("应变" if name == "strain_file" else "电池") + "数据",
@@ -155,14 +171,18 @@ class MonitorApp(tk.Tk):
             summary += f"  |  电池末点 {battery_end / scale:.2f} {unit}"
         self.summary.set(summary)
 
+    @staticmethod
+    def _strain_config(values):
+        channel = ",".join(values[k] for k in ("channel", "channel2", "channel3") if values[k] not in ("", "不选"))
+        return Settings(channel=channel,
+                        strain_hz=0 if values["strain_rate"] == "自动" else float(values["strain_rate"]),
+                        output_hz=float(values["output_rate"]), cutoff_hz=float(values["cutoff"]),
+                        median_points=int(values["median"]), delta=values["strain_display"].startswith("Δ"))
+
     def _settings(self):
         values = {k: v.get().strip() for k, v in self.fields.items()}
-        channel = ",".join(values[k] for k in ("channel", "channel2", "channel3") if values[k] not in ("", "不选"))
         combined = values["plot_mode"] == "应变＋电压电流"
-        cfg = Settings(channel=channel,
-                       strain_hz=0 if values["strain_rate"] == "自动" else float(values["strain_rate"]),
-                       output_hz=float(values["output_rate"]), cutoff_hz=float(values["cutoff"]),
-                       median_points=int(values["median"]), delta=values["strain_display"].startswith("Δ"),
+        cfg = replace(self._strain_config(values),
                        alignment="absolute" if not combined or values["align"].startswith("实际") else "first",
                        offset_s=float(values["offset"]) if combined else 0,
                        battery_mode={"自动（优先总时间）": "auto", "表内绝对时间": "absolute", "固定 100 Hz 逐行重建": "fixed"}[values["battery_time"]] if combined else "auto",
@@ -250,6 +270,7 @@ class MonitorApp(tk.Tk):
             except ValueError:
                 self.auto.set(False)
                 self.status.set("自动刷新间隔须为 1～86400 秒。")
+        self.summary_page.poll()
         self.poll_job = self.after(120, self._poll)
 
     def _finish(self):
@@ -313,6 +334,7 @@ class MonitorApp(tk.Tk):
             "temperature_save_dir": self.ugw.temp_save_dir_var.get().strip(),
             "ugw_tof_dir": self.ugw.tof_dir,
             "serial_preferences": self.ugw.get_preferences(),
+            "summary_preferences": self.summary_page.get_preferences(),
         }
         try:
             (ROOT / "settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -338,6 +360,7 @@ class MonitorApp(tk.Tk):
             if isinstance(tof_dir, str):
                 self.ugw.tof_dir = tof_dir
             self.ugw.restore_preferences(data.get("serial_preferences"))
+            self.summary_page.restore_preferences(data.get("summary_preferences"))
         except (OSError, ValueError):
             pass
 
@@ -351,6 +374,7 @@ class MonitorApp(tk.Tk):
         if self.busy_job is not None:
             self.after_cancel(self.busy_job)
         self.ugw.shutdown()
+        self.summary_page.shutdown()
         self.update_idletasks()
         super().destroy()
 
