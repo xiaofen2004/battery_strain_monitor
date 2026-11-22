@@ -81,9 +81,6 @@ class ScrollArea(ttk.Frame):
         self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.hbar = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
         self.canvas.configure(yscrollcommand=self.vbar.set, xscrollcommand=self.hbar.set)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
         self.body = ttk.Frame(self.canvas)
         self.item = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         self.pending = None
@@ -102,16 +99,19 @@ class ScrollArea(ttk.Frame):
             self.after_cancel(self.pending)
             self.pending = None
         width, height = self.winfo_width(), self.winfo_height()
+        if width <= 1 or height <= 1:
+            return
         min_w, min_h = self.min_size()
         bar = self.vbar.winfo_reqwidth()
         need_h = width < min_w
         need_v = height - (bar if need_h else 0) < min_h
         need_h = width - (bar if need_v else 0) < min_w
-        for scrollbar, needed, place in ((self.vbar, need_v, dict(row=0, column=1, sticky="ns")),
-                                         (self.hbar, need_h, dict(row=1, column=0, sticky="ew"))):
-            scrollbar.grid(**place) if needed else scrollbar.grid_remove()
-        body_w = max(width - (bar if need_v else 0), min_w)
-        body_h = max(height - (bar if need_h else 0), min_h)
+        view_w, view_h = width - (bar if need_v else 0), height - (bar if need_h else 0)
+        self.canvas.place(x=0, y=0, width=view_w, height=view_h)
+        self.vbar.place(x=view_w, y=0, width=bar, height=view_h) if need_v else self.vbar.place_forget()
+        self.hbar.place(x=0, y=view_h, width=view_w, height=bar) if need_h else self.hbar.place_forget()
+        body_w = max(view_w, min_w)
+        body_h = max(view_h, min_h)
         self.canvas.itemconfigure(self.item, width=body_w, height=body_h)
         self.canvas.configure(scrollregion=(0, 0, body_w, body_h))
 

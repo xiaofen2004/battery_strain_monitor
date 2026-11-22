@@ -7,3 +7,4 @@ last_error.log
 .build-spec/
 .migration-env/
 startup_error.log
+release/settings.json

@@ -55,6 +55,19 @@ class AppModeTests(unittest.TestCase):
             finally:
                 app.destroy()
 
+    def test_visible_window_shows_content(self):
+        with patch.object(MonitorApp, "_load_settings"):
+            app = MonitorApp()
+            try:
+                app.update()
+                app.after(500, app.quit)
+                app.mainloop()
+                canvas = app.scroll_area.canvas
+                self.assertGreater(canvas.winfo_width(), app.winfo_width() // 2)
+                self.assertGreater(canvas.winfo_height(), app.winfo_height() // 2)
+            finally:
+                app.destroy()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
