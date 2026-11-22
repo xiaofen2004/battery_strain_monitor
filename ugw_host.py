@@ -127,10 +127,35 @@ TOF_MIN_CORR = 0.35
 # 2. Main application
 # ============================================================
 
+
+PANEL_BG = "#f8fafc"
+PANEL_BORDER = "#d8e2ed"
+
+
+def configure_panel_styles(parent, px):
+    style = ttk.Style(parent)
+    style.configure("Monitor.TFrame", background=PANEL_BG)
+    for kind in ("TLabel", "Muted.TLabel", "TCheckbutton", "TRadiobutton"):
+        style.configure(f"Monitor.{kind}", background=PANEL_BG)
+    for kind in ("TCheckbutton", "TRadiobutton"):
+        style.map(f"Monitor.{kind}", background=[("disabled", PANEL_BG), ("!disabled", PANEL_BG)])
+    style.configure("Monitor.TLabelframe", background=PANEL_BG, bordercolor=PANEL_BORDER,
+                    lightcolor=PANEL_BORDER, darkcolor=PANEL_BORDER, relief="solid", borderwidth=1)
+    style.configure("Monitor.TLabelframe.Label", background=PANEL_BG, foreground="#172b4d",
+                    font=("Microsoft YaHei UI", 10, "bold"))
+    style.configure("Monitor.TNotebook", background=PANEL_BG, lightcolor=PANEL_BG,
+                    darkcolor=PANEL_BG, bordercolor=PANEL_BG, borderwidth=0)
+    style.configure("Monitor.TNotebook.Tab", padding=(px(9), px(4)))
+    style.map("Monitor.TNotebook.Tab", background=[("selected", PANEL_BG), ("!selected", "#edf2f7")])
+    for kind in ("TButton", "Primary.TButton"):
+        style.configure(f"Monitor.{kind}", padding=(px(7), px(4)))
+
+
 class UGWHost:
 
-    def __init__(self, parent):
+    def __init__(self, parent, px):
         self.parent = parent
+        self.px = px
 
         # ----------------------------------------------------
         # Serial
@@ -346,835 +371,270 @@ class UGWHost:
     # ========================================================
 
     def build_ui(self):
+        p = self.px
+        configure_panel_styles(self.parent, p)
+        self.layout = ttk.Frame(self.parent, padding=p(10))
+        self.layout.pack(fill=tk.BOTH, expand=True)
 
-        outer = ttk.Frame(
-            self.parent,
-            padding=8
+        serial_panel = ttk.LabelFrame(self.layout, text="串口连接", style="Monitor.TLabelframe", padding=p(8))
+        serial_panel.pack(fill=tk.X, pady=(0, p(7)))
+        self._build_serial_bar(serial_panel)
+
+        self.control_grid = ttk.Frame(self.layout)
+        self.control_grid.pack(fill=tk.X)
+        self.control_grid.columnconfigure(0, weight=5)
+        self.control_grid.columnconfigure(1, weight=6)
+
+        self.settings_panel = ttk.LabelFrame(
+            self.control_grid, text="超声设置", style="Monitor.TLabelframe", padding=p(8)
         )
+        self._build_ugw_settings(self.settings_panel)
+        self.actions_panel = ttk.Frame(self.control_grid)
 
-        self.layout = outer
-        outer.pack(
-            fill=tk.BOTH,
-            expand=True
+        temperature = ttk.LabelFrame(
+            self.actions_panel, text="温度采集", style="Monitor.TLabelframe", padding=p(8)
         )
+        temperature.pack(fill=tk.X, pady=(0, p(7)))
+        self._build_temperature_controls(temperature)
 
-        # ----------------------------------------------------
-        # Serial connection
-        # ----------------------------------------------------
-
-        conn = ttk.LabelFrame(
-            outer,
-            text="串口连接",
-            padding=8
+        operations = ttk.LabelFrame(
+            self.actions_panel, text="超声采集", style="Monitor.TLabelframe", padding=p(8)
         )
+        operations.pack(fill=tk.X, expand=True, anchor=tk.N)
+        self._build_ugw_controls(operations)
+        self.controls_stacked = None
+        self.reflow_controls(self.parent.winfo_screenwidth())
 
-        conn.pack(
-            fill=tk.X,
-            pady=(0, 6)
+        self.waveform_panel = ttk.LabelFrame(
+            self.layout, text="超声实时波形", style="Monitor.TLabelframe", padding=p(5)
         )
+        self.waveform_panel.pack(fill=tk.BOTH, expand=True, pady=p(7))
+        self.fig = Figure(figsize=(8, 3.5), dpi=95, facecolor=PANEL_BG)
+        self._empty_waveform()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.waveform_panel)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(
-            conn,
-            text="串口："
-        ).pack(side=tk.LEFT)
-
-        self.port_combo = ttk.Combobox(
-            conn,
-            textvariable=self.port_var,
-            width=12,
-            state="readonly"
+        log_panel = ttk.LabelFrame(self.layout, text="运行日志", style="Monitor.TLabelframe", padding=p(5))
+        log_panel.pack(fill=tk.X)
+        log_scroll = ttk.Scrollbar(log_panel, orient=tk.VERTICAL)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text = tk.Text(
+            log_panel, height=4, width=1, state=tk.DISABLED, font=("Consolas", 9),
+            background=PANEL_BG, foreground="#334155", relief=tk.FLAT, borderwidth=0,
+            highlightthickness=0, padx=p(4), pady=p(2), yscrollcommand=log_scroll.set,
         )
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll.configure(command=self.log_text.yview)
+        self.log("请先连接 STM32。采集超声前，请打开 UGW 电源。")
 
-        self.port_combo.pack(
-            side=tk.LEFT,
-            padx=4
-        )
-
-        self.refresh_button = ttk.Button(
-            conn,
-            text="刷新串口",
-            command=self.refresh_ports
-        )
-
-        self.refresh_button.pack(
-            side=tk.LEFT,
-            padx=4
-        )
-
-        ttk.Label(
-            conn,
-            text="波特率："
-        ).pack(
-            side=tk.LEFT,
-            padx=(12, 0)
-        )
-
+    def _build_serial_bar(self, panel):
+        p = self.px
+        ttk.Label(panel, text="串口", style="Monitor.TLabel").pack(side=tk.LEFT)
+        self.port_combo = ttk.Combobox(panel, textvariable=self.port_var, width=9, state="readonly")
+        self.port_combo.pack(side=tk.LEFT, padx=p(4))
+        self.refresh_button = self._button(panel, "刷新", self.refresh_ports)
+        self.refresh_button.pack(side=tk.LEFT)
+        ttk.Label(panel, text="波特率", style="Monitor.TLabel").pack(side=tk.LEFT, padx=(p(10), p(4)))
         self.baud_combo = ttk.Combobox(
-            conn,
-            textvariable=self.baud_var,
-            width=13,
-            values=(
-                "115200",
-                "230400",
-                "460800",
-                "921600",
-                "1382400",
-                "2000000"
-            )
+            panel, textvariable=self.baud_var, width=10,
+            values=("115200", "230400", "460800", "921600", "1382400", "2000000"),
+        )
+        self.baud_combo.pack(side=tk.LEFT)
+        self.connect_button = self._button(panel, "连接", self.connect_serial, primary=True)
+        self.connect_button.pack(side=tk.LEFT, padx=p(4))
+        self.disconnect_button = self._button(panel, "断开", self.disconnect_serial)
+        self.disconnect_button.pack(side=tk.LEFT)
+        ttk.Label(panel, textvariable=self.connection_var, style="Monitor.Muted.TLabel").pack(
+            side=tk.RIGHT, padx=(p(8), 0)
         )
 
-        self.baud_combo.pack(
-            side=tk.LEFT,
-            padx=4
-        )
-
-        self.connect_button = ttk.Button(
-            conn,
-            text="连接",
-            command=self.connect_serial
-        )
-
-        self.connect_button.pack(
-            side=tk.LEFT,
-            padx=4
-        )
-
-        self.disconnect_button = ttk.Button(
-            conn,
-            text="断开",
-            command=self.disconnect_serial
-        )
-
-        self.disconnect_button.pack(
-            side=tk.LEFT,
-            padx=4
-        )
-
-        ttk.Label(
-            conn,
-            textvariable=self.connection_var
-        ).pack(
-            side=tk.LEFT,
-            padx=15
-        )
-
-        # ----------------------------------------------------
-        # Configuration
-        # ----------------------------------------------------
-
-        config = ttk.Notebook(outer)
-        config.pack(fill=tk.X, pady=4)
-        channels = ttk.Frame(config)
-        storage = ttk.Frame(config)
-        display = ttk.Frame(config)
-        config.add(channels, text="采集模式")
-        config.add(storage, text="保存与周期")
+    def _build_ugw_settings(self, panel):
+        p = self.px
+        config = ttk.Notebook(panel, style="Monitor.TNotebook")
+        config.pack(fill=tk.BOTH, expand=True)
+        mode = ttk.Frame(config, style="Monitor.TFrame", padding=(p(4), p(6)))
+        display = ttk.Frame(config, style="Monitor.TFrame", padding=(p(4), p(6)))
+        config.add(mode, text="采集模式")
         config.add(display, text="波形设置")
 
-        # UGW mode
-        mode_box = ttk.LabelFrame(
-            channels,
-            text="超声导波模式",
-            padding=8
-        )
+        choices = ttk.Frame(mode, style="Monitor.TFrame")
+        choices.pack(fill=tk.X, pady=(0, p(6)))
+        for value, title in (("M", "M · 三路依次采集"), ("R", "R · 多路径单发单收")):
+            ttk.Radiobutton(
+                choices, text=title, variable=self.mode_var, value=value,
+                command=self.update_mode, style="Monitor.TRadiobutton",
+            ).pack(side=tk.LEFT, padx=(0, p(12)))
 
-        mode_box.pack(
-            side=tk.LEFT,
-            fill=tk.Y,
-            padx=3
-        )
-
-        ttk.Radiobutton(
-            mode_box,
-            text="M：三路依次采集",
-            variable=self.mode_var,
-            value="M",
-            command=self.update_mode
-        ).pack(anchor=tk.W)
-
-        ttk.Radiobutton(
-            mode_box,
-            text="R：多路径单发单收",
-            variable=self.mode_var,
-            value="R",
-            command=self.update_mode
-        ).pack(anchor=tk.W)
-
-        ttk.Label(
-            mode_box,
-            text="M：Tx1/2/3 → Rx4\nR：勾选多组 Tx-Rx",
-            foreground="#526071"
-        ).pack(
-            anchor=tk.W,
-            pady=(8, 0)
-        )
-
-        # ----------------------------------------------------
-        # M channel selection
-        # ----------------------------------------------------
-
-        m_box = ttk.LabelFrame(
-            channels,
-            text="M 模式：显示 / 保存通道",
-            padding=8
-        )
-
-        m_box.pack(
-            side=tk.LEFT,
-            fill=tk.Y,
-            padx=3
-        )
-
+        self.m_options = ttk.Frame(mode, style="Monitor.TFrame")
+        self.r_options = ttk.Frame(mode, style="Monitor.TFrame")
+        m_channels = ttk.Frame(self.m_options, style="Monitor.TFrame")
+        m_channels.pack(fill=tk.X)
         for ch in M_CHANNELS:
-
-            cb = ttk.Checkbutton(
-                m_box,
-                text=f"Tx{ch} → Rx4",
-                variable=self.channel_vars[ch],
-                command=self.on_channel_selection_change
+            check = ttk.Checkbutton(
+                m_channels, text=f"Tx{ch} → Rx4", variable=self.channel_vars[ch],
+                command=self.on_channel_selection_change, style="Monitor.TCheckbutton",
             )
-
-            cb.pack(
-                anchor=tk.W,
-                pady=2
-            )
-
-            self.channel_checkbuttons[ch] = cb
-
+            check.pack(side=tk.LEFT, padx=(0, p(10)))
+            self.channel_checkbuttons[ch] = check
         ttk.Label(
-            m_box,
-            text="仍完整接收3路；只筛选绘图和MAT保存",
-            foreground="#526071"
-        ).pack(
-            anchor=tk.W,
-            pady=(5, 0)
-        )
+            self.m_options, text="每轮接收三路，勾选项用于绘图和保存。", style="Monitor.Muted.TLabel"
+        ).pack(anchor=tk.W, pady=(p(5), 0))
 
-        # ----------------------------------------------------
-        # R path selection
-        # ----------------------------------------------------
-
-        r_box = ttk.LabelFrame(
-            channels,
-            text="R 模式：选择一个或多个路径",
-            padding=8
-        )
-
-        r_box.pack(
-            side=tk.LEFT,
-            fill=tk.Y,
-            padx=3
-        )
-
-        ttk.Label(
-            r_box,
-            text="勾选后按顺序逐条发送 Rxy："
-        ).pack(anchor=tk.W)
-
-        pair_grid = ttk.Frame(r_box)
-
-        pair_grid.pack(
-            anchor=tk.W,
-            pady=3
-        )
-
+        pair_grid = ttk.Frame(self.r_options, style="Monitor.TFrame")
+        pair_grid.pack(anchor=tk.W)
         for row, tx in enumerate(range(1, 5)):
-
-            ttk.Label(
-                pair_grid,
-                text=f"Tx{tx}",
-                width=4
-            ).grid(
-                row=row,
-                column=0,
-                sticky="w"
+            ttk.Label(pair_grid, text=f"Tx{tx}", style="Monitor.TLabel").grid(
+                row=row, column=0, sticky=tk.W, padx=(0, p(9))
             )
-
-            col = 1
-
             for rx in range(1, 5):
-
                 if tx == rx:
-
-                    ttk.Label(
-                        pair_grid,
-                        text="—",
-                        width=8,
-                        anchor="center"
-                    ).grid(
-                        row=row,
-                        column=col,
-                        padx=1,
-                        pady=1
+                    ttk.Label(pair_grid, text="—", style="Monitor.Muted.TLabel").grid(
+                        row=row, column=rx, padx=p(5)
                     )
-
                 else:
-
-                    label = f"R{tx}{rx}"
-
-                    cb = ttk.Checkbutton(
-                        pair_grid,
-                        text=label,
-                        variable=self.r_pair_vars[(tx, rx)]
+                    check = ttk.Checkbutton(
+                        pair_grid, text=f"R{tx}{rx}", variable=self.r_pair_vars[tx, rx],
+                        style="Monitor.TCheckbutton",
                     )
+                    check.grid(row=row, column=rx, sticky=tk.W, padx=p(5))
+                    self.r_pair_checkbuttons[tx, rx] = check
+        pair_buttons = ttk.Frame(self.r_options, style="Monitor.TFrame")
+        pair_buttons.pack(anchor=tk.W, pady=(p(4), 0))
+        self._button(pair_buttons, "全选", self.select_all_r_pairs).pack(side=tk.LEFT, padx=(0, p(5)))
+        self._button(pair_buttons, "清空", self.clear_r_pairs).pack(side=tk.LEFT)
 
-                    cb.grid(
-                        row=row,
-                        column=col,
-                        sticky="w",
-                        padx=1,
-                        pady=1
-                    )
-
-                    self.r_pair_checkbuttons[(tx, rx)] = cb
-
-                col += 1
-
-        pair_buttons = ttk.Frame(r_box)
-
-        pair_buttons.pack(
-            fill=tk.X,
-            pady=(4, 0)
-        )
-
-        ttk.Button(
-            pair_buttons,
-            text="全选",
-            command=self.select_all_r_pairs
-        ).pack(
-            side=tk.LEFT,
-            padx=2
-        )
-
-        ttk.Button(
-            pair_buttons,
-            text="清空",
-            command=self.clear_r_pairs
-        ).pack(
-            side=tk.LEFT,
-            padx=2
-        )
-
-        # ----------------------------------------------------
-        # Display settings
-        # ----------------------------------------------------
-
-        display_box = ttk.LabelFrame(
-            display,
-            text="波形 / ADC 设置",
-            padding=8
-        )
-
-        display_box.pack(
-            side=tk.LEFT,
-            fill=tk.Y,
-            padx=3
-        )
-
-        ttk.Checkbutton(
-            display_box,
-            text="显示电压 Voltage",
-            variable=self.plot_voltage_var,
-            command=self.plot_latest
-        ).pack(anchor=tk.W)
-
-        ttk.Checkbutton(
-            display_box,
-            text="时间轴 Time / us",
-            variable=self.time_axis_var,
-            command=self.plot_latest
-        ).pack(anchor=tk.W)
-
-        self.add_entry(
-            display_box,
-            "显示采样率 Hz",
-            self.display_fs_var
-        )
-
-        ttk.Label(
-            display_box,
-            text="仅影响绘图时间轴",
-            foreground="#526071"
-        ).pack(anchor=tk.W)
-
-        bits_entry = self.add_entry(
-            display_box,
-            "ADC 位数",
-            self.bits_var
-        )
-
-        bits_entry.configure(
-            state="readonly"
-        )
-
-        vref_entry = self.add_entry(
-            display_box,
-            "参考电压 V",
-            self.vref_var
-        )
-
-        vref_entry.configure(
-            state="readonly"
-        )
-
-        ttk.Label(
-            display_box,
-            text="固定：12 bit / 3.3 V",
-            foreground="#526071"
-        ).pack(anchor=tk.W)
-
-        self.add_entry(
-            display_box,
-            "接收超时 s",
-            self.timeout_var
-        )
-
-        # ----------------------------------------------------
-        # UGW saving
-        # ----------------------------------------------------
-
-        save_box = ttk.LabelFrame(
-            storage,
-            text="UGW 数据保存",
-            padding=8
-        )
-
-        save_box.pack(
-            side=tk.LEFT,
-            fill=tk.BOTH,
-            expand=True,
-            padx=3
-        )
-
+        ttk.Separator(panel).pack(fill=tk.X, pady=(p(6), p(3)))
+        storage = ttk.Frame(panel, style="Monitor.TFrame", padding=(p(4), p(4)))
+        storage.pack(fill=tk.X)
+        storage.columnconfigure(1, weight=1)
         self.save_check = ttk.Checkbutton(
-            save_box,
-            text="启用 MAT 保存",
-            variable=self.save_var
+            storage, text="保存超声 MAT", variable=self.save_var, style="Monitor.TCheckbutton"
         )
-
-        self.save_check.pack(anchor=tk.W)
-
-        save_row = ttk.Frame(save_box)
-
-        save_row.pack(
-            fill=tk.X,
-            pady=7
+        self.save_check.grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(storage, textvariable=self.save_dir_var, width=13).grid(
+            row=0, column=1, sticky="ew", padx=p(5)
         )
-
-        ttk.Entry(
-            save_row,
-            textvariable=self.save_dir_var
-        ).pack(
-            side=tk.LEFT,
-            fill=tk.X,
-            expand=True
-        )
-
-        ttk.Button(
-            save_row,
-            text="选择目录",
-            command=self.choose_folder
-        ).pack(
-            side=tk.LEFT,
-            padx=4
-        )
-
-        ttk.Label(
-            save_box,
-            text="变量：UGW_result；M按勾选通道保存；R每条路径单独保存",
-            foreground="#526071"
-        ).pack(anchor=tk.W)
-
-        # ----------------------------------------------------
-        # UGW automatic acquisition
-        # ----------------------------------------------------
-
-        auto_box = ttk.LabelFrame(
-            storage,
-            text="自动 M / R 采集",
-            padding=8
-        )
-
-        auto_box.pack(
-            side=tk.LEFT,
-            fill=tk.Y,
-            padx=3
-        )
-
+        self._button(storage, "选择目录", self.choose_folder).grid(row=0, column=2)
+        auto = ttk.Frame(storage, style="Monitor.TFrame")
+        auto.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(p(6), 0))
         self.auto_check = ttk.Checkbutton(
-            auto_box,
-            text="启用自动采集",
-            variable=self.auto_var,
-            command=self.update_auto
+            auto, text="启用自动采集", variable=self.auto_var,
+            command=self.update_auto, style="Monitor.TCheckbutton",
         )
-
-        self.auto_check.pack(anchor=tk.W)
-
+        self.auto_check.pack(side=tk.LEFT)
+        ttk.Label(auto, text="周期 / s", style="Monitor.TLabel").pack(side=tk.LEFT, padx=(p(10), p(4)))
+        ttk.Entry(auto, textvariable=self.interval_var, width=7).pack(side=tk.LEFT)
         ttk.Label(
-            auto_box,
-            text="周期 / s"
-        ).pack(
-            anchor=tk.W,
-            pady=(7, 0)
-        )
+            storage, text="自动采集保存 MAT，R 模式按路径分别保存。", style="Monitor.Muted.TLabel",
+        ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(p(4), 0))
 
-        ttk.Entry(
-            auto_box,
-            textvariable=self.interval_var,
-            width=10
-        ).pack(anchor=tk.W)
-
+        for column, (label, variable) in enumerate((
+            ("显示电压", self.plot_voltage_var), ("使用时间轴 / μs", self.time_axis_var),
+        )):
+            ttk.Checkbutton(
+                display, text=label, variable=variable, command=self.plot_latest, style="Monitor.TCheckbutton",
+            ).grid(row=0, column=column * 2, columnspan=2, sticky=tk.W)
+        for index, (label, variable, state) in enumerate((
+            ("显示采样率 / Hz", self.display_fs_var, "normal"),
+            ("接收超时 / s", self.timeout_var, "normal"),
+            ("ADC 位数", self.bits_var, "readonly"),
+            ("参考电压 / V", self.vref_var, "readonly"),
+        )):
+            row, column = 1 + index // 2, 2 * (index % 2)
+            ttk.Label(display, text=label, style="Monitor.TLabel").grid(
+                row=row, column=column, sticky=tk.W, padx=(0, p(4)), pady=p(3)
+            )
+            ttk.Entry(display, textvariable=variable, width=8, state=state).grid(
+                row=row, column=column + 1, sticky=tk.W, padx=(0, p(8))
+            )
         ttk.Label(
-            auto_box,
-            text="R模式每轮完成所有勾选路径\n自动UGW强制保存MAT",
-            foreground="#526071"
-        ).pack(
-            anchor=tk.W,
-            pady=7
-        )
+            display, text="显示采样率只影响绘图时间轴。", style="Monitor.Muted.TLabel",
+        ).grid(row=3, column=0, columnspan=4, sticky=tk.W)
 
-        # ----------------------------------------------------
-        # UGW buttons and power controls
-        # ----------------------------------------------------
+    def _build_temperature_controls(self, panel):
+        p = self.px
+        timing = ttk.Frame(panel, style="Monitor.TFrame")
+        timing.pack(fill=tk.X)
+        self.temp_once_button = self._button(timing, "单次测温", self.temperature_once)
+        self.temp_once_button.pack(side=tk.LEFT, padx=(0, p(5)))
+        self._button(timing, "温度趋势", self.show_temperature_window).pack(side=tk.LEFT)
+        ttk.Label(timing, text="周期 / s", style="Monitor.TLabel").pack(side=tk.LEFT, padx=(p(10), p(4)))
+        ttk.Entry(timing, textvariable=self.temp_interval_var, width=6).pack(side=tk.LEFT)
+        self.temp_start_button = self._button(timing, "开始定时", self.start_temperature_auto, primary=True)
+        self.temp_start_button.pack(side=tk.LEFT, padx=p(5))
+        self.temp_stop_button = self._button(timing, "停止定时", self.stop_temperature_auto)
+        self.temp_stop_button.pack(side=tk.LEFT)
 
-        power_row = ttk.Frame(outer)
-
-        power_row.pack(
-            fill=tk.X,
-            pady=5
-        )
-
-        self.power_on_button = ttk.Button(
-            power_row,
-            text="打开 UGW 电源 (v)",
-            command=self.turn_on_ugw_power
-        )
-
-        self.power_on_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        self.power_off_button = ttk.Button(
-            power_row,
-            text="停止 UGW 并关闭电源 (0)",
-            command=self.turn_off_ugw_power
-        )
-
-        self.power_off_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        ttk.Label(
-            power_row,
-            textvariable=self.power_status_var
-        ).pack(
-            side=tk.LEFT,
-            padx=8
-        )
-
-        buttons = ttk.Frame(outer)
-        buttons.pack(fill=tk.X, pady=2)
-
-        self.once_button = ttk.Button(
-            buttons,
-            text="单轮采集",
-            command=self.acquire_once
-        )
-
-        self.once_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        self.auto_start_button = ttk.Button(
-            buttons,
-            text="开始自动 M / R",
-            command=self.start_auto
-        )
-
-        self.auto_start_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        self.stop_button = ttk.Button(
-            buttons,
-            text="停止 UGW",
-            command=self.stop_acquisition
-        )
-
-        self.stop_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        self.clear_button = ttk.Button(
-            buttons,
-            text="清空波形",
-            command=self.clear_plot
-        )
-
-        self.clear_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        self.tof_button = ttk.Button(
-            buttons,
-            text="文件夹 ToF 分析",
-            command=self.analyze_tof_folder
-        )
-
-        self.tof_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        status_row = ttk.Frame(outer)
-        status_row.pack(fill=tk.X)
-
-        ttk.Label(
-            status_row,
-            textvariable=self.count_var
-        ).pack(
-            side=tk.LEFT,
-            padx=8
-        )
-
-        ttk.Label(
-            status_row,
-            textvariable=self.status_var
-        ).pack(
-            side=tk.LEFT,
-            padx=8
-        )
-
-        # ----------------------------------------------------
-        # Temperature controls
-        # ----------------------------------------------------
-
-        temp_box = ttk.LabelFrame(
-            outer,
-            text="温度采集（只使用单次 Y 指令）",
-            padding=8
-        )
-
-        temp_box.pack(
-            fill=tk.X,
-            pady=5
-        )
-
-        temp_controls = ttk.Frame(temp_box)
-        temp_controls.pack(fill=tk.X)
-
-        self.temp_once_button = ttk.Button(
-            temp_controls,
-            text="温度单次采集",
-            command=self.temperature_once
-        )
-
-        self.temp_once_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        ttk.Button(
-            temp_controls,
-            text="打开温度监测窗口",
-            command=self.show_temperature_window
-        ).pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        ttk.Label(
-            temp_controls,
-            text="温度定时周期 / s"
-        ).pack(
-            side=tk.LEFT,
-            padx=(12, 2)
-        )
-
-        ttk.Entry(
-            temp_controls,
-            textvariable=self.temp_interval_var,
-            width=8
-        ).pack(
-            side=tk.LEFT,
-            padx=2
-        )
-
-        self.temp_start_button = ttk.Button(
-            temp_controls,
-            text="开始温度定时",
-            command=self.start_temperature_auto
-        )
-
-        self.temp_start_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        self.temp_stop_button = ttk.Button(
-            temp_controls,
-            text="停止温度定时",
-            command=self.stop_temperature_auto
-        )
-
-        self.temp_stop_button.pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        temp_storage = ttk.Frame(temp_box)
-        temp_storage.pack(fill=tk.X, pady=(5, 0))
-
+        storage = ttk.Frame(panel, style="Monitor.TFrame")
+        storage.pack(fill=tk.X, pady=(p(6), p(3)))
         self.temp_save_check = ttk.Checkbutton(
-            temp_storage,
-            text="保存温度 CSV（可选）",
-            variable=self.temp_save_var
+            storage, text="保存温度 CSV", variable=self.temp_save_var, style="Monitor.TCheckbutton"
         )
-
-        self.temp_save_check.pack(
-            side=tk.LEFT,
-            padx=(12, 3)
+        self.temp_save_check.pack(side=tk.LEFT)
+        ttk.Entry(storage, textvariable=self.temp_save_dir_var, width=12).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=p(5)
         )
+        self._button(storage, "选择目录", self.choose_temp_folder).pack(side=tk.LEFT)
+        ttk.Label(panel, textvariable=self.temp_status_var, style="Monitor.Muted.TLabel").pack(anchor=tk.W)
 
-        ttk.Entry(
-            temp_storage,
-            textvariable=self.temp_save_dir_var,
-        ).pack(
-            side=tk.LEFT,
-            fill=tk.X,
-            expand=True,
-            padx=3
+    def _build_ugw_controls(self, panel):
+        p = self.px
+        power = ttk.Frame(panel, style="Monitor.TFrame")
+        power.pack(fill=tk.X)
+        self.power_on_button = self._button(power, "打开 UGW 电源", self.turn_on_ugw_power)
+        self.power_on_button.pack(side=tk.LEFT, padx=(0, p(5)))
+        self.power_off_button = self._button(power, "停止并关电源", self.turn_off_ugw_power)
+        self.power_off_button.pack(side=tk.LEFT)
+        ttk.Label(power, textvariable=self.power_status_var, style="Monitor.Muted.TLabel").pack(
+            side=tk.LEFT, padx=(p(7), 0)
         )
-
-        ttk.Button(
-            temp_storage,
-            text="选择温度目录",
-            command=self.choose_temp_folder
-        ).pack(
-            side=tk.LEFT,
-            padx=3
-        )
-
-        ttk.Label(
-            temp_box,
-            textvariable=self.temp_status_var
-        ).pack(
-            anchor=tk.W,
-            padx=8
-        )
-
-        # ----------------------------------------------------
-        # UGW waveform
-        # ----------------------------------------------------
-
-        plot_box = ttk.LabelFrame(
-            outer,
-            text="UGW 实时接收波形",
-            padding=5
-        )
-
-        self.waveform_panel = plot_box
-        plot_box.pack(
-            fill=tk.BOTH,
-            expand=True,
-            pady=5
-        )
-
-        self.fig = Figure(
-            figsize=(9, 4.5),
-            dpi=95
-        )
-
-        self.axes = self.fig.subplots(
-            4,
-            1,
-            sharex=True
-        )
-
-        self.canvas = FigureCanvasTkAgg(
-            self.fig,
-            master=plot_box
-        )
-
-        self.canvas.get_tk_widget().pack(
-            fill=tk.BOTH,
-            expand=True
-        )
-
-        # ----------------------------------------------------
-        # Log
-        # ----------------------------------------------------
-
-        log_box = ttk.LabelFrame(
-            outer,
-            text="运行日志",
-            padding=5
-        )
-
-        log_box.pack(
-            fill=tk.X,
-            pady=5
-        )
-
-        self.log_text = tk.Text(
-            log_box,
-            height=5,
-            font=("Consolas", 9),
-            state=tk.DISABLED
-        )
-
-        self.log_text.pack(
-            fill=tk.BOTH,
-            expand=True
-        )
-
-        self.log(
-            "上位机启动完成。"
-            "请先连接 STM32，再发送 v 开启 UGW 电源。"
-        )
-
-
-    def minimum_size(self):
-        # The embedded chart resizes with its container. Use the controls'
-        # natural sizes so the chart cannot increase the scroll area itself.
-        controls = [panel for panel in self.layout.winfo_children()
-                    if panel is not self.waveform_panel]
-        width = max(panel.winfo_reqwidth() for panel in controls)
-        height = sum(panel.winfo_reqheight() for panel in controls)
-        chart_height = round(self.parent.winfo_fpixels("3i"))
-        return width + 16, height + chart_height + 72
+        actions = ttk.Frame(panel, style="Monitor.TFrame")
+        actions.pack(fill=tk.X, pady=(p(6), p(3)))
+        self.once_button = self._button(actions, "单轮采集", self.acquire_once, primary=True)
+        self.auto_start_button = self._button(actions, "开始自动 M / R", self.start_auto, primary=True)
+        self.stop_button = self._button(actions, "停止 UGW", self.stop_acquisition)
+        self.clear_button = self._button(actions, "清空波形", self.clear_plot)
+        self.tof_button = self._button(actions, "文件夹 ToF 分析", self.analyze_tof_folder)
+        for button in (self.once_button, self.auto_start_button, self.stop_button, self.clear_button, self.tof_button):
+            button.pack(side=tk.LEFT, padx=(0, p(5)))
+        status = ttk.Frame(panel, style="Monitor.TFrame")
+        status.pack(fill=tk.X)
+        ttk.Label(status, textvariable=self.count_var, style="Monitor.Muted.TLabel").pack(side=tk.LEFT)
+        ttk.Label(status, textvariable=self.status_var, style="Monitor.Muted.TLabel",
+                  wraplength=p(270)).pack(side=tk.LEFT, padx=(p(8), 0))
 
     @staticmethod
-    def add_entry(parent, label, variable):
+    def _button(parent, text, command, *, primary=False):
+        style = "Monitor.Primary.TButton" if primary else "Monitor.TButton"
+        return ttk.Button(parent, text=text, command=command, style=style, width=0)
 
-        row = ttk.Frame(parent)
+    def reflow_controls(self, available_width):
+        gap = self.px(7)
+        required_width = self.settings_panel.winfo_reqwidth() + self.actions_panel.winfo_reqwidth()
+        stacked = available_width < required_width + self.px(24) + gap
+        if stacked == self.controls_stacked:
+            return False
+        self.controls_stacked = stacked
+        if stacked:
+            self.settings_panel.grid(row=0, column=0, columnspan=2, sticky="ew", padx=0)
+            self.actions_panel.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(gap, 0))
+        else:
+            self.settings_panel.grid(row=0, column=0, columnspan=1, sticky="nsew", padx=(0, gap))
+            self.actions_panel.grid(row=0, column=1, columnspan=1, sticky="nsew", pady=0)
+        return True
 
-        row.pack(
-            fill=tk.X,
-            pady=2
-        )
+    def minimum_size(self):
+        controls = [panel for panel in self.layout.winfo_children() if panel is not self.waveform_panel]
+        width = max(panel.winfo_reqwidth() for panel in controls)
+        height = sum(panel.winfo_reqheight() for panel in controls)
+        return width + self.px(20), height + self.px(300)
 
-        ttk.Label(
-            row,
-            text=label,
-            width=13
-        ).pack(side=tk.LEFT)
-
-        entry = ttk.Entry(
-            row,
-            textvariable=variable,
-            width=13
-        )
-
-        entry.pack(side=tk.LEFT)
-
-        return entry
+    def _empty_waveform(self):
+        self.fig.clear()
+        axis = self.fig.add_subplot(111)
+        axis.set_axis_off()
+        axis.text(.5, .5, "等待超声采集", transform=axis.transAxes,
+                  ha="center", va="center", color="#64748b", fontsize=11)
 
 
     # ========================================================
@@ -1182,33 +642,13 @@ class UGWHost:
     # ========================================================
 
     def update_mode(self):
-
-        mode = self.mode_var.get()
-
-        m_state = (
-            "normal"
-            if mode == "M"
-            else "disabled"
-        )
-
-        r_state = (
-            "normal"
-            if mode == "R"
-            else "disabled"
-        )
-
-        for cb in self.channel_checkbuttons.values():
-
-            cb.configure(
-                state=m_state
-            )
-
-        for cb in self.r_pair_checkbuttons.values():
-
-            cb.configure(
-                state=r_state
-            )
-
+        if self.mode_var.get() == "M":
+            self.r_options.pack_forget()
+            self.m_options.pack(fill=tk.X)
+        else:
+            self.m_options.pack_forget()
+            self.r_options.pack(fill=tk.X)
+        self.parent.event_generate("<<MonitorLayoutChanged>>", when="tail")
 
     def on_channel_selection_change(self):
 
@@ -3440,6 +2880,7 @@ class UGWHost:
             "1050x680"
         )
 
+        win.configure(background=PANEL_BG)
         self.temp_window = win
 
         # ----------------------------------------------------
@@ -3448,6 +2889,7 @@ class UGWHost:
 
         readout = ttk.LabelFrame(
             win,
+            style="Monitor.TLabelframe",
             text="最新温度读数",
             padding=10
         )
@@ -3486,7 +2928,7 @@ class UGWHost:
 
         for label, key in fields:
 
-            cell = ttk.Frame(readout)
+            cell = ttk.Frame(readout, style="Monitor.TFrame")
 
             cell.pack(
                 side=tk.LEFT,
@@ -3497,11 +2939,13 @@ class UGWHost:
 
             ttk.Label(
                 cell,
+                style="Monitor.TLabel",
                 text=label
             ).pack(anchor="center")
 
             ttk.Label(
                 cell,
+                style="Monitor.TLabel",
                 textvariable=self.temp_value_vars[key],
                 font=("Microsoft YaHei", 18, "bold")
             ).pack(
@@ -3511,6 +2955,7 @@ class UGWHost:
 
         ttk.Label(
             readout,
+            style="Monitor.TLabel",
             textvariable=self.temp_value_vars["time"]
         ).pack(
             anchor=tk.W,
@@ -3523,6 +2968,7 @@ class UGWHost:
 
         graph_box = ttk.LabelFrame(
             win,
+            style="Monitor.TLabelframe",
             text="温度定时采集趋势（跳过的采样点会留空）",
             padding=5
         )
@@ -3587,6 +3033,7 @@ class UGWHost:
 
         ttk.Label(
             win,
+            style="Monitor.TLabel",
             text=(
                 "说明：定时温度采集只重复发送 Y；"
                 "若与 UGW 采集重叠，该时刻不发送 Y，并在曲线上标记缺测。"
@@ -3775,11 +3222,11 @@ class UGWHost:
                 squeeze=False
             ).reshape(-1)
 
-        self.axes = list(axs)
+        axes = list(axs)
 
         labels = result["ChannelLabels"]
 
-        for i, ax in enumerate(self.axes):
+        for i, ax in enumerate(axes):
 
             if i >= n_channels:
 
@@ -3825,26 +3272,11 @@ class UGWHost:
 
 
     def clear_plot(self):
-
         self.plot_cleared = True
-
-        for ax in self.axes:
-
-            ax.clear()
-
-            ax.set_visible(True)
-
-            ax.grid(True)
-
+        self._empty_waveform()
         self.canvas.draw_idle()
-
-        self.status_var.set(
-            "UGW 波形已清空；原始数据和 MAT 文件未删除"
-        )
-
-        self.log(
-            "UGW 波形已清空；不删除任何采集数据。"
-        )
+        self.status_var.set("UGW 波形已清空")
+        self.log("UGW 波形已清空。")
 
 
     # ========================================================

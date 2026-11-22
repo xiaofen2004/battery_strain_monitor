@@ -68,9 +68,17 @@ class MonitorApp(tk.Tk):
 
         ugw_area = ScrollArea(serial_tab, lambda: self.ugw.minimum_size())
         ugw_area.pack(fill="both", expand=True)
-        self.ugw = UGWHost(ugw_area.body)
+        self.ugw = UGWHost(ugw_area.body, self.px)
         ugw_area.watch(ugw_area.body)
         ugw_area.bind_scrolling()
+
+        def resize_acquisition(event):
+            reflowed = self.ugw.reflow_controls(ugw_area.winfo_width())
+            if reflowed or event.widget is ugw_area.body:
+                ugw_area.schedule_refresh()
+
+        ugw_area.bind("<Configure>", resize_acquisition, add="+")
+        ugw_area.body.bind("<<MonitorLayoutChanged>>", resize_acquisition)
 
     def _browse(self, name):
         path = filedialog.askopenfilename(title="选择" + ("应变" if name == "strain_file" else "电池") + "数据",
