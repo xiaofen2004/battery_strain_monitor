@@ -79,8 +79,8 @@ DEFAULT_VREF = 3.3
 
 DEFAULT_TIMEOUT = 10.0
 
-DEFAULT_UGW_INTERVAL = 5.0
-DEFAULT_TEMP_INTERVAL = 5.0
+DEFAULT_UGW_INTERVAL = 15.0
+DEFAULT_TEMP_INTERVAL = 10.0
 
 # Independent data directories
 DEFAULT_BASE_FOLDER = (
@@ -601,6 +601,7 @@ class UGWHost:
         status = ttk.Frame(panel, style="Monitor.TFrame")
         status.pack(fill=tk.X)
         ttk.Label(status, textvariable=self.count_var, style="Monitor.Muted.TLabel").pack(side=tk.LEFT)
+        self._button(status, "次数清零", self.reset_acquisition_count).pack(side=tk.LEFT, padx=(p(6), 0))
         ttk.Label(status, textvariable=self.status_var, style="Monitor.Muted.TLabel",
                   wraplength=p(270)).pack(side=tk.LEFT, padx=(p(8), 0))
 
@@ -3271,6 +3272,11 @@ class UGWHost:
 
         self.canvas.draw_idle()
 
+
+    def reset_acquisition_count(self):
+        self.acquisition_count = 0
+        self.count_var.set("UGW 采集次数：0")
+        self.log("UGW 采集次数已清零。")
 
     def clear_plot(self):
         self.plot_cleared = True
