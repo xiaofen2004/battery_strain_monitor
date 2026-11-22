@@ -189,9 +189,11 @@ class SummaryTests(unittest.TestCase):
         from datetime import datetime, timedelta
         import openpyxl
         from matplotlib.figure import Figure
+        from scipy.io import savemat
         from data_io import parse_times
         from summary_data import load_summary, visible_traces
         from summary_plot import draw_summary
+        from tof_analysis import ADC_FS_HZ, analyze_tof_files
 
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -272,6 +274,83 @@ class SummaryTests(unittest.TestCase):
             temp_only = load_summary({"temperature": temperature})
             self.assertTrue(draw_summary(figure, temp_only, set(), "相对时间", "同图叠加"))
             self.assertEqual(len(figure.axes[0].patches), 0)
+
+            # MATs are created out of time order, with file times unrelated to their names.
+            ultrasound = root / "ultrasound"
+            ultrasound.mkdir()
+            wave_time = np.arange(800) / ADC_FS_HZ
+            wave = np.sin(2 * np.pi * 220e3 * wave_time) * np.exp(-((wave_time - 45e-6) / 8e-6) ** 2)
+
+            def save_wave(name, samples, channel=3, mode="M"):
+                path = ultrasound / name
+                savemat(path, {"UGW_result": {"Mode": mode, "TxChannels": [channel], "ADC_raw": samples}})
+                return path
+
+            later = save_wave(f"UGW_M_{at(16.5):%Y%m%d_%H%M%S_%f}.mat", np.roll(wave, 3))
+            early = save_wave(f"UGW_M_{at(4.125):%Y%m%d_%H%M%S_%f}.mat", wave)
+            middle = save_wave(f"UGW_M_{at(6.25):%Y%m%d_%H%M%S_%f}.mat", np.roll(wave, 2))
+            low_quality = save_wave(f"UGW_M_{at(12):%Y%m%d_%H%M%S_%f}.mat", np.zeros_like(wave))
+            save_wave(f"UGW_R34_{at(2):%Y%m%d_%H%M%S_%f}.mat", wave, mode="R")
+            save_wave(f"UGW_M_{at(3):%Y%m%d_%H%M%S_%f}.mat", wave, channel=2)
+            save_wave("no_timestamp.mat", wave)
+            combined = load_summary({"strain": strain, "battery": battery, "temperature": temperature,
+                                     "ultrasound": ultrasound}, cfg, tof_selection=("M", ((3, 4),)))
+            self.assertEqual(combined.origin, epoch + 4.125)
+            self.assertEqual(combined.ultrasound_note, "M 模式超声 ToF 有效 3 / 7 个 MAT")
+            tof = combined.traces["ultrasound"]
+            np.testing.assert_array_equal(tof.time - epoch, [4.125, 6.25, 12, 16.5])
+            rows = analyze_tof_files([early, middle, low_quality, later], "M", ((3, 4),))[(3, 4)]
+            np.testing.assert_array_equal(tof.values["Tx3 → Rx4"], [row["DeltaToF_us"] for row in rows])
+            np.testing.assert_allclose(tof.values["Tx3 → Rx4"][[0, 1, 3]],
+                                       np.array([0, 2, 3]) * 1e6 / ADC_FS_HZ, atol=.025)
+            for mode in ("分开绘制", "同图叠加"):
+                self.assertTrue(draw_summary(figure, combined, {2, 4}, "s", mode))
+                self.assertEqual(len(figure.axes), 5)
+                self.assertEqual(figure.axes[0].get_xlim()[0], 0)
+                axis = next(axis for axis in figure.axes if axis.get_ylabel() == "相对 ToF / μs")
+                line = axis.lines[0]
+                self.assertEqual(line.get_marker(), ".")
+                valid = np.isfinite(line.get_ydata())
+                np.testing.assert_array_equal(line.get_xdata()[valid], [.25, 10.5])
+                self.assertTrue(np.isnan(line.get_ydata()[1]))
+
+    def test_tof_selection_matches_saved_modes_and_keeps_each_path_reference(self):
+        from matplotlib.figure import Figure
+        from scipy.io import savemat
+        from summary_data import load_summary
+        from summary_plot import draw_summary
+        from tof_analysis import ADC_FS_HZ
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            t = np.arange(800) / ADC_FS_HZ
+            wave = np.sin(2 * np.pi * 220e3 * t) * np.exp(-((t - 45e-6) / 8e-6) ** 2)
+
+            def save(command, second, tx, samples):
+                name = root / f"UGW_{command}_20261122_1200{second:02d}_123456.mat"
+                savemat(name, {"UGW_result": {"Mode": command[0], "Command": command,
+                                             "TxChannels": tx, "ChannelNumbers": np.arange(len(tx)) + 1
+                                             if command == "M" else [1], "ADC_raw": samples}})
+
+            save("M", 0, [1, 2], np.column_stack((wave, np.roll(wave, 6))))
+            save("M", 1, [1, 2], np.column_stack((np.roll(wave, 2), np.roll(wave, 7))))
+            save("R34", 2, [3], np.roll(wave, 5))
+            save("R14", 3, [1], wave)
+            save("R34", 4, [3], np.roll(wave, 8))
+            save("R14", 5, [1], np.roll(wave, 1))
+
+            m = load_summary({"ultrasound": root}, tof_selection=("M", ((1, 4), (2, 4), (3, 4))))
+            self.assertIn("无有效数据：Tx3 → Rx4", m.ultrasound_note)
+            np.testing.assert_allclose(m.traces["ultrasound"].values["Tx1 → Rx4"], [0, .475], atol=.025)
+            np.testing.assert_allclose(m.traces["ultrasound"].values["Tx2 → Rx4"], [0, .2375], atol=.025)
+            r = load_summary({"ultrasound": root}, tof_selection=("R", ((1, 4), (3, 4))))
+            figure = Figure()
+            self.assertTrue(draw_summary(figure, r, set(), "s", "分开绘制"))
+            traces = {line.get_label(): line for line in figure.axes[0].lines}
+            self.assertEqual(set(traces), {"Tx1 → Rx4", "Tx3 → Rx4"})
+            np.testing.assert_allclose(traces["Tx1 → Rx4"].get_xdata(), [1, 3])
+            np.testing.assert_allclose(traces["Tx3 → Rx4"].get_xdata(), [0, 2])
+            np.testing.assert_allclose(traces["Tx3 → Rx4"].get_ydata(), [0, .7125], atol=.025)
 
 
     def test_summary_shows_isolated_strain_points_without_connecting_gaps(self):

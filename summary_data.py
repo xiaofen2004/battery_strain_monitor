@@ -8,12 +8,14 @@ import pandas as pd
 
 from data_io import BatteryReader, StrainReader, check_cancel, snapshot
 from processing import infer_rate, make_plot_data
+from tof_analysis import analyze_tof_files, mat_recorded_time, path_label
 
 
 @dataclass
 class Trace:
     time: np.ndarray
     values: dict[str, np.ndarray]
+    sample_mask: dict[str, np.ndarray] | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class SummaryData:
     strain_label: str
     battery_clock_rebuilt: bool = False
     strain_rate_note: str = ""
+    ultrasound_note: str = ""
 
 
 def _local_clock_seconds(value):
@@ -143,7 +146,65 @@ def work_steps(battery):
     return steps
 
 
-def load_summary(paths, strain_settings=None, temperature_start="", progress=lambda _: None, cancel=None):
+def read_ultrasound(folder, selection, progress, cancel):
+    if selection is None:
+        raise ValueError("请选择超声采集模式和通道。")
+    mode, pairs = selection
+    files = [path for path in Path(folder).glob("*.mat") if path.is_file()]
+    if not files:
+        raise ValueError("所选超声文件夹中没有 MAT 文件。")
+    timestamps = {}
+    for path in files:
+        check_cancel(cancel)
+        try:
+            timestamps[path.name] = mat_recorded_time(path)
+        except ValueError:
+            continue
+    if not timestamps:
+        raise ValueError("超声 MAT 文件名中没有可识别的时间戳。")
+    ordered = sorted((path for path in files if path.name in timestamps),
+                     key=lambda path: (timestamps[path.name], path.name.lower()))
+
+    def before_file(index):
+        check_cancel(cancel)
+        if index == 1 or index % 50 == 0:
+            progress(f"计算超声 ToF · {index} / {len(ordered)}")
+
+    paths = analyze_tof_files(ordered, mode, pairs, before_file=before_file)
+    rows = {pair: records for pair, records in paths.items()
+            if any(np.isfinite(row["DeltaToF_us"]) for row in records)}
+    if not rows:
+        labels = "、".join(map(path_label, pairs))
+        raise ValueError(f"没有可绘制的超声 ToF。请确认 MAT 保存了 {mode} 模式的所选路径（{labels}）。")
+    # Use file positions even when two files have the same timestamp.
+    names = sorted({row["FileName"] for records in rows.values() for row in records},
+                   key=lambda name: (timestamps[name], name.lower()))
+    time = np.array([timestamps[name] for name in names])
+    positions = {name: i for i, name in enumerate(names)}
+    values, sampled = {}, {}
+    valid_files = np.zeros(time.size, dtype=bool)
+    for pair, records in rows.items():
+        name = path_label(pair)
+        indices = [positions[row["FileName"]] for row in records]
+        tof = np.array([row["DeltaToF_us"] for row in records])
+        values[name] = np.full(time.size, np.nan)
+        values[name][indices] = tof
+        sampled[name] = np.zeros(time.size, dtype=bool)
+        sampled[name][indices] = True
+        valid_files[indices] |= np.isfinite(tof)
+    valid = np.flatnonzero(valid_files)
+    span = slice(valid[0], valid[-1] + 1)
+    trace = Trace(time[span], {name: series[span] for name, series in values.items()},
+                  {name: mask[span] for name, mask in sampled.items()})
+    note = f"{mode} 模式超声 ToF 有效 {valid.size} / {len(files)} 个 MAT"
+    missing = [path_label(pair) for pair in pairs if pair not in rows]
+    if missing:
+        note += " · 无有效数据：" + "、".join(missing)
+    return trace, note
+
+
+def load_summary(paths, strain_settings=None, temperature_start="", progress=lambda _: None, cancel=None,
+                 *, tof_selection=None):
     """Read checked sources and start at the latest first valid timestamp."""
     traces = {}
     steps = []
@@ -176,13 +237,17 @@ def load_summary(paths, strain_settings=None, temperature_start="", progress=lam
     if "temperature" in paths:
         progress("读取温度 CSV")
         traces["temperature"] = read_temperature(paths["temperature"], temperature_start, cancel)
+    ultrasound_note = ""
+    if "ultrasound" in paths:
+        progress("扫描超声 MAT 文件夹")
+        traces["ultrasound"], ultrasound_note = read_ultrasound(paths["ultrasound"], tof_selection, progress, cancel)
     check_cancel(cancel)
     if not traces:
         raise ValueError("请至少勾选一类数据。")
     origin = max(float(trace.time[0]) for trace in traces.values())
     if origin > min(float(trace.time[-1]) for trace in traces.values()):
-        raise ValueError("所选文件的绝对时间没有共同区间，请核对实验日期和时间。")
-    return SummaryData(origin, traces, steps, strain_label, battery_clock_rebuilt, strain_rate_note)
+        raise ValueError("所选数据的绝对时间没有共同区间，请核对实验日期和时间。")
+    return SummaryData(origin, traces, steps, strain_label, battery_clock_rebuilt, strain_rate_note, ultrasound_note)
 
 
 def latest_temperature_file(folder):
@@ -228,16 +293,22 @@ def visible_traces(data, selected_numbers):
         if not parts:
             continue
         if len(parts) == 1:
-            a, b = parts[0]
-            values = {label: column[a:b] for label, column in trace.values.items() if np.isfinite(column[a:b]).any()}
-            if values:
-                output[key] = Trace(time[a:b], values)
-            continue
-        pieces = [np.arange(a, b) for a, b in parts]
-        indices = np.concatenate(pieces)
-        breaks = np.cumsum([len(piece) for piece in pieces[:-1]], dtype=int)
-        values = {label: np.insert(column[indices], breaks, np.nan) for label, column in trace.values.items()
+            indices = slice(*parts[0])
+            breaks = np.array([], dtype=int)
+        else:
+            pieces = [np.arange(a, b) for a, b in parts]
+            indices = np.concatenate(pieces)
+            breaks = np.cumsum([len(piece) for piece in pieces[:-1]], dtype=int)
+        values = {label: column[indices] for label, column in trace.values.items()
                   if np.isfinite(column[indices]).any()}
         if values:
-            output[key] = Trace(np.insert(time[indices], breaks, time[indices[breaks]]), values)
+            times = time[indices]
+            masks = ({label: trace.sample_mask[label][indices] for label in values}
+                     if trace.sample_mask is not None else None)
+            if breaks.size:
+                times = np.insert(times, breaks, times[breaks])
+                values = {label: np.insert(column, breaks, np.nan) for label, column in values.items()}
+                if masks is not None:
+                    masks = {label: np.insert(mask, breaks, True) for label, mask in masks.items()}
+            output[key] = Trace(times, values, masks)
     return output, selected

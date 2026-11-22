@@ -33,7 +33,7 @@ UGW save:
     MATLAB-compatible UGW_result MAT structure.
 
 ToF:
-    Folder-based M-mode Tx3 -> Rx4 analysis.
+    Folder-based ToF analysis of the selected acquisition paths.
     XCorr_Wave_W1_Lag2 processing.
 """
 
@@ -55,14 +55,9 @@ from serial.tools import list_ports
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from scipy.io import savemat, loadmat
+from scipy.io import savemat
 
-from scipy.signal import (
-    butter,
-    lfilter,
-    detrend,
-    correlate
-)
+from tof_analysis import ADC_FS_HZ, analyze_tof_files, path_label
 
 
 # ============================================================
@@ -70,9 +65,6 @@ from scipy.signal import (
 # ============================================================
 
 DEFAULT_BAUDRATE = 1382400
-
-# Actual STM32 ADC sampling rate
-ADC_FS_HZ = 80e6 / (6.5 + 12.5)
 
 DEFAULT_ADC_BITS = 12
 DEFAULT_VREF = 3.3
@@ -112,16 +104,6 @@ TEMP_RESPONSE_TIMEOUT = 2.5
 # Power commands
 POWER_ON_COMMAND = b"v"
 POWER_OFF_COMMAND = b"0"
-
-# ToF parameters
-TOF_HP_HZ = 170e3
-TOF_LP_HZ = 300e3
-TOF_INTERP_FACTOR = 10
-
-TOF_SEARCH_US = (5.0, 100.0)
-TOF_MAX_LAG_US = 2.0
-TOF_MIN_CORR = 0.35
-
 
 # ============================================================
 # 2. Main application
@@ -721,6 +703,14 @@ class UGWHost:
             for pair, var in self.r_pair_vars.items()
             if var.get()
         ]
+
+    def tof_selection(self):
+        mode = self.mode_var.get()
+        pairs = ([(ch, M_RX) for ch in M_CHANNELS if self.channel_vars[ch].get()]
+                 if mode == "M" else self.selected_r_pairs())
+        if not pairs:
+            raise ValueError(f"请先在「超声设置」中勾选 {mode} 模式下要分析的通道或路径。")
+        return mode, tuple(pairs)
 
 
     def update_auto(self):
@@ -3328,674 +3318,79 @@ class UGWHost:
     # 19. Folder ToF analysis
     # ========================================================
 
-    @staticmethod
-    def _mat_field(obj, name, default=None):
-
-        if isinstance(obj, dict):
-            return obj.get(name, default)
-
-        return getattr(
-            obj,
-            name,
-            default
-        )
-
-
-    @staticmethod
-    def _mat_ints(value):
-
-        if value is None:
-            return []
-
-        try:
-
-            arr = np.asarray(value).squeeze()
-
-            if arr.size == 0:
-                return []
-
-            return [
-                int(round(float(v)))
-                for v in np.asarray(arr).reshape(-1)
-            ]
-
-        except Exception:
-
-            return []
-
-
-    @staticmethod
-    def _mat_string(value):
-
-        if value is None:
-            return ""
-
-        try:
-
-            arr = np.asarray(value).squeeze()
-
-            if arr.size == 1:
-                value = arr.item()
-
-            if isinstance(value, bytes):
-
-                return value.decode(
-                    "utf-8",
-                    errors="ignore"
-                ).strip()
-
-            return str(value).strip()
-
-        except Exception:
-
-            return str(value).strip()
-
-
-    @classmethod
-    def _extract_tx3_rx4(cls, ugw):
-
-        mode = cls._mat_string(
-            cls._mat_field(ugw, "Mode", "")
-        ).upper()
-
-        command = cls._mat_string(
-            cls._mat_field(ugw, "Command", "")
-        ).upper()
-
-        if mode == "R" or command.startswith("R"):
-
-            raise ValueError(
-                "R 模式数据不是本次 M 模式 Tx3->Rx4 ToF 分析对象"
-            )
-
-        raw_value = cls._mat_field(
-            ugw,
-            "ADC_raw",
-            None
-        )
-
-        if raw_value is None:
-
-            raise ValueError(
-                "缺少 ADC_raw 字段"
-            )
-
-        raw = np.asarray(
-            raw_value,
-            dtype=np.float64
-        )
-
-        if raw.ndim == 1:
-
-            raw = raw.reshape(-1, 1)
-
-        elif raw.ndim != 2:
-
-            raise ValueError(
-                "ADC_raw 不是二维矩阵"
-            )
-
-        if raw.shape[0] <= 4 and raw.shape[1] > 4:
-            raw = raw.T
-
-        channel_numbers = cls._mat_ints(
-            cls._mat_field(ugw, "ChannelNumbers", None)
-        )
-
-        tx_channels = cls._mat_ints(
-            cls._mat_field(ugw, "TxChannels", None)
-        )
-
-        channel_ids = []
-
-        if len(channel_numbers) == raw.shape[1]:
-
-            channel_ids = channel_numbers
-
-        elif len(tx_channels) == raw.shape[1]:
-
-            channel_ids = tx_channels
-
-        if 3 in channel_ids:
-
-            col = channel_ids.index(3)
-
-        elif not channel_ids and raw.shape[1] >= 3:
-
-            col = 2
-
-        else:
-
-            raise ValueError(
-                "此 MAT 没有保存 Tx3；采集 M 模式时需要勾选 Tx3"
-            )
-
-        waveform = raw[:, col].copy()
-
-        if waveform.size < 100 or not np.all(np.isfinite(waveform)):
-
-            raise ValueError(
-                "Tx3 波形长度不足或含 NaN/Inf"
-            )
-
-        return waveform
-
-
-    @staticmethod
-    def _preprocess_tof_wave(raw):
-
-        fs = ADC_FS_HZ
-
-        x = detrend(
-            np.asarray(raw, dtype=np.float64),
-            type="linear"
-        )
-
-        bh, ah = butter(
-            1,
-            TOF_HP_HZ / (fs / 2),
-            btype="high"
-        )
-
-        bl, al = butter(
-            2,
-            TOF_LP_HZ / (fs / 2),
-            btype="low"
-        )
-
-        x = lfilter(
-            bh,
-            ah,
-            x
-        )
-
-        x = lfilter(
-            bl,
-            al,
-            x
-        )
-
-        t_old = (
-            np.arange(x.size, dtype=np.float64)
-            / fs
-        )
-
-        n_new = (
-            (x.size - 1)
-            * TOF_INTERP_FACTOR
-            + 1
-        )
-
-        t_new = np.linspace(
-            t_old[0],
-            t_old[-1],
-            n_new
-        )
-
-        y = np.interp(
-            t_new,
-            t_old,
-            x
-        )
-
-        return (
-            y,
-            fs * TOF_INTERP_FACTOR
-        )
-
-
-    @staticmethod
-    def _relative_tof_xcorr(
-        waveform,
-        reference,
-        fs_interp
-    ):
-
-        if waveform.size != reference.size:
-
-            return np.nan, np.nan
-
-        t_us = (
-            np.arange(reference.size, dtype=np.float64)
-            / fs_interp
-            * 1e6
-        )
-
-        mask = (
-            (t_us >= TOF_SEARCH_US[0])
-            &
-            (t_us <= TOF_SEARCH_US[1])
-        )
-
-        if np.count_nonzero(mask) < 20:
-
-            return np.nan, np.nan
-
-        a = reference[mask].copy()
-
-        b = waveform[mask].copy()
-
-        a -= np.mean(a)
-
-        b -= np.mean(b)
-
-        na = np.linalg.norm(a)
-
-        nb = np.linalg.norm(b)
-
-        if na < 1e-12 or nb < 1e-12:
-
-            return np.nan, np.nan
-
-        c = correlate(
-            b,
-            a,
-            mode="full",
-            method="auto"
-        )
-
-        lags = np.arange(
-            -a.size + 1,
-            b.size
-        )
-
-        max_lag = int(
-            round(
-                TOF_MAX_LAG_US
-                * 1e-6
-                * fs_interp
-            )
-        )
-
-        keep = (
-            np.abs(lags) <= max_lag
-        )
-
-        c = c[keep] / (na * nb)
-
-        lags = lags[keep]
-
-        idx = int(
-            np.argmax(c)
-        )
-
-        quality = float(
-            c[idx]
-        )
-
-        lag_us = float(
-            lags[idx] / fs_interp * 1e6
-        )
-
-        if quality < TOF_MIN_CORR:
-
-            return np.nan, quality
-
-        return lag_us, quality
-
-
     def analyze_tof_folder(self):
-
+        try:
+            mode, pairs = self.tof_selection()
+        except ValueError as exc:
+            messagebox.showwarning("ToF 分析设置", str(exc), parent=self.parent)
+            return
         folder = filedialog.askdirectory(
             parent=self.parent,
-
-            title="选择包含 M 模式 MAT 文件的文件夹",
-
-            initialdir=self.tof_dir or self.save_dir_var.get() or str(DEFAULT_UGW_FOLDER)
-
+            title=f"选择包含 {mode} 模式 MAT 文件的文件夹",
+            initialdir=self.tof_dir or self.save_dir_var.get() or str(DEFAULT_UGW_FOLDER),
         )
-
         if not folder:
             return
-
         self.tof_dir = folder
         folder = Path(folder)
-
-        files = sorted(
-            folder.glob("*.mat"),
-            key=lambda p: p.name.lower()
-        )
-
+        files = sorted((path for path in folder.glob("*.mat") if path.is_file()), key=lambda path: path.name.lower())
         if not files:
-
-            messagebox.showwarning(
-                "没有数据",
-                "所选文件夹中没有 MAT 文件。"
-            )
-
+            messagebox.showwarning("没有数据", "所选文件夹中没有 MAT 文件。", parent=self.parent)
             return
 
-        self.log(
-            f"开始文件夹 ToF 分析：{folder}；发现 {len(files)} 个 MAT"
-        )
-
-        waves = []
-
-        skipped = 0
-
-        for path in files:
-
-            try:
-
-                mat = loadmat(
-                    str(path),
-                    squeeze_me=True,
-                    struct_as_record=False
-                )
-
-                if "UGW_result" in mat:
-
-                    ugw = mat["UGW_result"]
-
-                elif "UGW_Struct" in mat:
-
-                    ugw = mat["UGW_Struct"]
-
-                else:
-
-                    raise ValueError(
-                        "缺少 UGW_result / UGW_Struct"
-                    )
-
-                raw = self._extract_tx3_rx4(
-                    ugw
-                )
-
-                processed, fs_interp = (
-                    self._preprocess_tof_wave(raw)
-                )
-
-                waves.append({
-
-                    "name": path.name,
-
-                    "wave": processed,
-
-                    "fs": fs_interp
-
-                })
-
-            except Exception as exc:
-
-                skipped += 1
-
-                self.log(
-                    f"ToF 跳过 {path.name}：{exc}"
-                )
-
-        if not waves:
-
-            messagebox.showwarning(
-                "ToF 分析失败",
-                "没有有效的 M 模式 Tx3 数据。"
-                "请确认采集时勾选了 Tx3，并且文件是 M 模式。"
-            )
-
+        self.log(f"开始文件夹 ToF 分析 · {mode} 模式 · {folder} · {len(files)} 个 MAT")
+        series = analyze_tof_files(files, mode, pairs, log=self.log)
+        if not series:
+            labels = "、".join(map(path_label, pairs))
+            messagebox.showwarning("ToF 分析失败", f"所选 MAT 中没有 {mode} 模式的有效波形（{labels}）。",
+                                   parent=self.parent)
             return
 
-        reference = waves[0]["wave"]
-
-        reference_name = waves[0]["name"]
-
-        fs_interp = waves[0]["fs"]
-
-        rows = []
-
-        for index, item in enumerate(
-            waves,
-            start=1
-        ):
-
-            if (
-                not np.isclose(item["fs"], fs_interp)
-                or item["wave"].size != reference.size
-            ):
-
-                delta = np.nan
-                quality = np.nan
-                status = "长度/采样率不一致"
-
-            else:
-
-                delta, quality = self._relative_tof_xcorr(
-                    item["wave"],
-                    reference,
-                    fs_interp
-                )
-
-                if not np.isfinite(quality):
-
-                    status = "相关计算失败"
-
-                elif quality < TOF_MIN_CORR:
-
-                    status = "相关质量不足"
-
-                elif not np.isfinite(delta):
-
-                    status = "ToF 无效"
-
-                else:
-
-                    status = "有效"
-
-            rows.append({
-
-                "ContinuousIndex": index,
-
-                "FileName": item["name"],
-
-                "DeltaToF_us": delta,
-
-                "XCorrCoefficient": quality,
-
-                "Status": status,
-
-            })
-
-        x = np.asarray(
-            [r["ContinuousIndex"] for r in rows],
-            dtype=float
-        )
-
-        y = np.asarray(
-            [r["DeltaToF_us"] for r in rows],
-            dtype=float
-        )
-
-        valid = np.isfinite(y)
-
-        xv = x[valid]
-
-        yv = y[valid]
-
-        slope = intercept = r2 = rmse = np.nan
-
-        if yv.size >= 2:
-
-            p = np.polyfit(
-                xv,
-                yv,
-                1
-            )
-
-            slope = float(p[0])
-
-            intercept = float(p[1])
-
-            fit = np.polyval(
-                p,
-                xv
-            )
-
-            ss_res = float(
-                np.sum((yv - fit) ** 2)
-            )
-
-            ss_tot = float(
-                np.sum((yv - np.mean(yv)) ** 2)
-            )
-
-            if ss_tot > 1e-15:
-
-                r2 = 1.0 - ss_res / ss_tot
-
-            rmse = float(
-                np.sqrt(np.mean((yv - fit) ** 2))
-            )
-
-        csv_path = folder / (
-            "ToF_XCorr_Wave_W1_Lag2_"
-            + datetime.now().strftime("%Y%m%d_%H%M%S")
-            + ".csv"
-        )
-
-        with open(
-            csv_path,
-            "w",
-            newline="",
-            encoding="utf-8-sig"
-        ) as f:
-
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "ContinuousIndex",
-                    "FileName",
-                    "DeltaToF_us",
-                    "XCorrCoefficient",
-                    "Status"
-                ]
-            )
-
+        csv_path = folder / f"ToF_XCorr_Wave_W1_Lag2_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
+            fields = ["ContinuousIndex", "FileName", "DeltaToF_us", "XCorrCoefficient", "Status", "Path"]
+            writer = csv.DictWriter(f, fieldnames=fields)
             writer.writeheader()
+            for pair, rows in series.items():
+                writer.writerows({**row, "Path": path_label(pair)} for row in rows)
 
-            writer.writerows(rows)
-
-        # ----------------------------------------------------
-        # ToF visualization window
-        # ----------------------------------------------------
-
-        win = tk.Toplevel(
-            self.parent
-        )
-
-        win.title(
-            "STM32 Tx3 -> Rx4 | ToF 分析"
-        )
-
-        win.geometry(
-            "1120x700"
-        )
-
-        fig = Figure(
-            figsize=(10.5, 5.5),
-            dpi=100
-        )
-
+        win = tk.Toplevel(self.parent)
+        win.title(f"STM32 {mode} 模式 | 文件夹 ToF 分析")
+        win.geometry("1120x700")
+        fig = Figure(figsize=(10.5, 5.5), dpi=100)
         ax = fig.add_subplot(111)
-
-        ax.plot(
-            x,
-            y,
-            "o-",
-            linewidth=1.2,
-            markersize=4,
-            label="Delta ToF"
-        )
-
-        if np.isfinite(slope) and xv.size:
-
-            fit_x = np.linspace(
-                float(np.min(xv)),
-                float(np.max(xv)),
-                200
-            )
-
-            ax.plot(
-                fit_x,
-                slope * fit_x + intercept,
-                "--",
-                linewidth=1.5,
-                label="Linear fit"
-            )
-
-        ax.axhline(
-            0,
-            color="gray",
-            linestyle=":",
-            linewidth=0.8
-        )
-
-        ax.set_xlabel(
-            "Acquisition index"
-        )
-
-        ax.set_ylabel(
-            "Delta ToF / us"
-        )
-
-        ax.set_title(
-            "STM32 Tx3 -> Rx4 | XCorr_Wave_W1_Lag2"
-        )
-
-        ax.grid(
-            True,
-            alpha=0.35
-        )
-
-        ax.legend(
-            loc="best"
-        )
-
+        details = []
+        for pair, rows in series.items():
+            label = path_label(pair)
+            x = np.array([row["ContinuousIndex"] for row in rows])
+            y = np.array([row["DeltaToF_us"] for row in rows])
+            line, = ax.plot(x, y, "o-", linewidth=1.2, markersize=4, label=label)
+            valid = np.isfinite(y)
+            xv, yv = x[valid], y[valid]
+            detail = f"{label} · 有效 ToF {yv.size}/{len(rows)} · 参考 {rows[0]['FileName']}"
+            if yv.size >= 2:
+                slope, intercept = np.polyfit(xv, yv, 1)
+                fit_x = np.linspace(xv[0], xv[-1], 200)
+                ax.plot(fit_x, slope * fit_x + intercept, "--", color=line.get_color(), linewidth=1.3)
+                ss_res = np.sum((yv - (slope * xv + intercept)) ** 2)
+                ss_tot = np.sum((yv - np.mean(yv)) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 1e-15 else np.nan
+                detail += f" · R²={r2:.5f} · RMSE={np.sqrt(ss_res / yv.size):.5f} μs · 斜率={slope:.6f} μs/次"
+            details.append(detail)
+            self.log(detail)
+        missing = [path_label(pair) for pair in pairs if pair not in series]
+        if missing:
+            details.append("无匹配波形：" + "、".join(missing))
+        ax.axhline(0, color="gray", linestyle=":", linewidth=.8)
+        ax.set(xlabel="各路径采集序号", ylabel="相对 ToF / μs", title=f"{mode} 模式超声相对 ToF")
+        ax.grid(True, alpha=.35)
+        ax.legend(ncol=min(4, len(series)), loc="best")
         fig.tight_layout()
-
-        canvas = FigureCanvasTkAgg(
-            fig,
-            master=win
-        )
-
+        canvas = FigureCanvasTkAgg(fig, master=win)
         canvas.draw()
-
-        canvas.get_tk_widget().pack(
-            fill=tk.BOTH,
-            expand=True
-        )
-
-        ttk.Label(
-            win,
-            text=(
-                f"MAT 文件：{len(files)}    "
-                f"有效波形：{len(waves)}    "
-                f"有效 ToF：{int(yv.size)}    "
-                f"跳过：{skipped}\n"
-
-                f"统一参考：{reference_name}\n"
-
-                f"R²={r2:.5f}    "
-                f"RMSE={rmse:.5f} us    "
-                f"Slope={slope:.6f} us/index\n"
-
-                f"HP=170 kHz, LP=300 kHz, "
-                f"插值=10×, 搜索=5~100 us, "
-                f"最大时移=±2 us, 最低相关系数=0.35"
-            ),
-            justify=tk.LEFT
-        ).pack(
-            fill=tk.X,
-            padx=10,
-            pady=8
-        )
-
-        self.log(
-            f"ToF 分析完成：R²={r2:.5f}, "
-            f"RMSE={rmse:.5f} us, "
-            f"slope={slope:.6f} us/index"
-        )
-
-        self.log(
-            f"ToF CSV：{csv_path}"
-        )
+        ttk.Label(win, text="\n".join(details), justify=tk.LEFT).pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=8)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.log(f"ToF CSV：{csv_path}")
 
 
     # ========================================================

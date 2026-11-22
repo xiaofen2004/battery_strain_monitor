@@ -26,7 +26,7 @@
     "ugw_interval": "15.0",
     "temperature_interval": "10.0",
     "auto_ugw": false,
-    "save_mat": false,
+    "save_mat": true,
     "save_temperature_csv": false,
     "plot_voltage": false,
     "use_time_axis": false,

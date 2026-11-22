@@ -82,7 +82,8 @@ class MonitorApp(tk.Tk):
 
         ugw_area.bind("<Configure>", resize_acquisition, add="+")
         ugw_area.body.bind("<<MonitorLayoutChanged>>", resize_acquisition)
-        self.summary_page = SummaryPage(summary_tab, self.px, self._summary_locations, self._summary_strain_settings)
+        self.summary_page = SummaryPage(summary_tab, self.px, self._summary_locations,
+                                        self._summary_strain_settings, self.ugw.tof_selection)
         self.monitor_tabs.bind("<<NotebookTabChanged>>", self._tab_changed)
 
     def _tab_changed(self, _event):
@@ -91,7 +92,8 @@ class MonitorApp(tk.Tk):
 
     def _summary_locations(self):
         return (self.fields["strain_file"].get().strip(), self.fields["battery_file"].get().strip(),
-                self.ugw.temp_save_dir_var.get().strip())
+                self.ugw.temp_save_dir_var.get().strip(),
+                self.ugw.tof_dir.strip() or self.ugw.save_dir_var.get().strip())
 
     def _summary_strain_settings(self):
         return self._strain_config({key: variable.get().strip() for key, variable in self.fields.items()})

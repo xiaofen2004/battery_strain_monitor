@@ -78,7 +78,8 @@ class AppModeTests(unittest.TestCase):
               patch("ugw_host.list_ports.comports", return_value=ports)):
             root = Path(folder)
             temp_dir, ugw_dir, tof_dir = (root / name for name in ("温度记录", "超声采集", "历史超声"))
-            for directory in (temp_dir, ugw_dir, tof_dir):
+            summary_dir = root / "汇总超声"
+            for directory in (temp_dir, ugw_dir, tof_dir, summary_dir):
                 directory.mkdir()
             (root / "settings.json").write_text(
                 json.dumps({"channel": "CH17"}, ensure_ascii=False), encoding="utf-8"
@@ -94,11 +95,24 @@ class AppModeTests(unittest.TestCase):
                 host.save_dir_var.set(str(ugw_dir))
                 host.temp_save_dir_var.set(str(temp_dir))
                 host.tof_dir = str(tof_dir)
+                page = app.summary_page
+                page.sync_sources()
+                self.assertFalse(page.included["ultrasound"].get())
+                self.assertEqual(page.files["ultrasound"].get(), str(tof_dir))
+                with patch("summary_ui.filedialog.askdirectory", return_value=str(summary_dir)) as dialog:
+                    page._browse("ultrasound")
+                    self.assertEqual(dialog.call_args.kwargs["initialdir"], str(tof_dir))
+                self.assertTrue(page.included["ultrasound"].get())
                 host.port_var.set("COM5")
                 host.baud_var.set("921600")
                 host.mode_var.set("R")
                 host.channel_vars[2].set(False)
                 host.r_pair_vars[2, 4].set(True)
+                self.assertIn((2, 4), page.tof_selection()[1])
+                self.assertEqual(page.tof_selection()[0], "R")
+                host.mode_var.set("M")
+                self.assertEqual(page.tof_selection(), ("M", ((1, 4), (3, 4))))
+                host.mode_var.set("R")
                 host.interval_var.set("21.5")
                 host.temp_interval_var.set("13.25")
                 host.auto_var.set(True)
@@ -119,6 +133,9 @@ class AppModeTests(unittest.TestCase):
                 self.assertEqual(app.fields["channel"].get(), "CH17")
                 self.assertEqual(app.ugw.save_dir_var.get(), str(ugw_dir))
                 self.assertEqual(app.ugw.temp_save_dir_var.get(), str(temp_dir))
+                app.summary_page.sync_sources()
+                self.assertTrue(app.summary_page.included["ultrasound"].get())
+                self.assertEqual(app.summary_page.files["ultrasound"].get(), str(summary_dir))
                 app.monitor_tabs.select(1)
                 app.update_idletasks()
                 host = app.ugw

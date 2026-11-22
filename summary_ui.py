@@ -15,21 +15,22 @@ from ui_helpers import ScrollArea
 from ui_layout import ChartToolbar
 
 
-SOURCE_LABELS = {"strain": "应变", "battery": "电池充放电", "temperature": "温度"}
+SOURCE_LABELS = {"strain": "应变", "battery": "电池充放电", "temperature": "温度", "ultrasound": "超声 ToF"}
 
 
 class SummaryPage:
-    def __init__(self, parent, px, source_locations, strain_settings):
+    def __init__(self, parent, px, source_locations, strain_settings, tof_selection):
         self.parent = parent
         self.px = px
         self.source_locations = source_locations
         self.strain_settings = strain_settings
+        self.tof_selection = tof_selection
         self.files = {key: tk.StringVar(master=parent) for key in SOURCE_LABELS}
-        self.included = {key: tk.BooleanVar(master=parent, value=True) for key in SOURCE_LABELS}
+        self.included = {key: tk.BooleanVar(master=parent, value=key != "ultrasound") for key in SOURCE_LABELS}
         self.time_axis = tk.StringVar(master=parent, value="min")
         self.layout = tk.StringVar(master=parent, value=PLOT_LAYOUTS[0])
         self.temperature_start = tk.StringVar(master=parent)
-        self.status = tk.StringVar(master=parent, value="选择已保存的数据文件，读取后可筛选电池工步。")
+        self.status = tk.StringVar(master=parent, value="选择已保存的数据文件或超声 MAT 文件夹，读取后可筛选电池工步。")
         self.defaults = {}
         self.data = None
         self.checked_steps = set()
@@ -64,7 +65,8 @@ class SummaryPage:
             ttk.Entry(files, textvariable=self.files[key], width=18).grid(
                 row=row, column=1, sticky="ew", padx=p(7), pady=p(2)
             )
-            ttk.Button(files, text="浏览", command=lambda name=key: self._browse(name)).grid(row=row, column=2)
+            ttk.Button(files, text="选择文件夹" if key == "ultrasound" else "浏览",
+                       command=lambda name=key: self._browse(name)).grid(row=row, column=2, sticky="ew")
 
         options = ttk.Frame(controls, style="Card.TFrame", padding=p(10))
         options.grid(row=0, column=1, sticky="nsew")
@@ -147,25 +149,30 @@ class SummaryPage:
         status.grid(row=2, column=0, sticky="ew", pady=(p(6), 0))
 
     def sync_sources(self):
-        strain, battery, temperature_folder = self.source_locations()
+        strain, battery, temperature_folder, ultrasound_folder = self.source_locations()
         defaults = {"strain": strain, "battery": battery,
-                    "temperature": latest_temperature_file(temperature_folder)}
+                    "temperature": latest_temperature_file(temperature_folder), "ultrasound": ultrasound_folder}
         for key, variable in self.files.items():
             if variable.get() in ("", self.defaults.get(key)):
                 variable.set(defaults[key])
         self.defaults = defaults
 
     def _browse(self, key):
-        current = self.files[key].get()
-        directory = (Path(current).expanduser().parent if current else
-                     self.source_locations()[2] if key == "temperature" else None)
-        filetypes = {
-            "strain": [("应变文件", "*.xls *.xlsx *.txt *.tsv")],
-            "battery": [("电池工作簿", "*.xls *.xlsx")],
-            "temperature": [("温度 CSV", "*.csv")],
-        }
-        path = filedialog.askopenfilename(parent=self.parent, title=f"选择{SOURCE_LABELS[key]}文件",
-                                          initialdir=directory, filetypes=filetypes[key] + [("所有文件", "*.*")])
+        current = self.files[key].get().strip()
+        if key == "ultrasound":
+            directory = current or self.source_locations()[3]
+            path = filedialog.askdirectory(parent=self.parent, title="选择超声 MAT 文件夹",
+                                           initialdir=directory, mustexist=True)
+        else:
+            directory = (Path(current).expanduser().parent if current else
+                         self.source_locations()[2] if key == "temperature" else None)
+            filetypes = {
+                "strain": [("应变文件", "*.xls *.xlsx *.txt *.tsv")],
+                "battery": [("电池工作簿", "*.xls *.xlsx")],
+                "temperature": [("温度 CSV", "*.csv")],
+            }
+            path = filedialog.askopenfilename(parent=self.parent, title=f"选择{SOURCE_LABELS[key]}文件",
+                                              initialdir=directory, filetypes=filetypes[key] + [("所有文件", "*.*")])
         if path:
             self.files[key].set(path)
             self.included[key].set(True)
@@ -176,28 +183,33 @@ class SummaryPage:
             paths = {}
             for key, button in self.included.items():
                 if button.get():
-                    path = Path(self.files[key].get().strip()).expanduser()
-                    if not path.is_file():
+                    value = self.files[key].get().strip()
+                    path = Path(value).expanduser()
+                    if key == "ultrasound":
+                        if not value or not path.is_dir():
+                            raise ValueError("请选择有效的超声 MAT 文件夹。")
+                    elif not path.is_file():
                         raise ValueError(f"请选择有效的{SOURCE_LABELS[key]}文件。")
                     paths[key] = path
             if not paths:
                 raise ValueError("请至少勾选一类数据。")
             cfg = self.strain_settings() if "strain" in paths else None
+            selection = self.tof_selection() if "ultrasound" in paths else None
         except (OSError, ValueError) as exc:
             self.status.set(str(exc))
             return
 
         self.read_button.state(["disabled"])
         self.status.set("读取采集文件…")
-        threading.Thread(target=self._read, args=(paths, cfg, self.temperature_start.get().strip()),
+        threading.Thread(target=self._read, args=(paths, cfg, self.temperature_start.get().strip(), selection),
                          daemon=True).start()
 
-    def _read(self, paths, cfg, start):
+    def _read(self, paths, cfg, start, selection):
         def progress(message):
             self.events.put(("progress", message))
 
         try:
-            data = load_summary(paths, cfg, start, progress, self.cancel)
+            data = load_summary(paths, cfg, start, progress, self.cancel, tof_selection=selection)
         except Exception as exc:
             self.events.put(("error", str(exc)))
         else:
@@ -281,6 +293,8 @@ class SummaryPage:
             start += f"  ·  {self.data.strain_rate_note}"
         if self.data.battery_clock_rebuilt:
             start += "  ·  电池绝对时间有倒退，已按首条时间＋总时间重建"
+        if self.data.ultrasound_note:
+            start += f"  ·  {self.data.ultrasound_note}"
         self.status.set(start)
 
     def get_preferences(self):
