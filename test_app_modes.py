@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,8 +72,10 @@ class AppModeTests(unittest.TestCase):
                 app.destroy()
 
 
-    def test_serial_monitor_restores_independent_output_directories(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(monitor, "ROOT", Path(folder)):
+    def test_serial_monitor_restores_settings_and_independent_output_directories(self):
+        ports = [SimpleNamespace(device="COM3"), SimpleNamespace(device="COM5")]
+        with (tempfile.TemporaryDirectory() as folder, patch.object(monitor, "ROOT", Path(folder)),
+              patch("ugw_host.list_ports.comports", return_value=ports)):
             root = Path(folder)
             temp_dir, ugw_dir, tof_dir = (root / name for name in ("温度记录", "超声采集", "历史超声"))
             for directory in (temp_dir, ugw_dir, tof_dir):
@@ -85,9 +88,26 @@ class AppModeTests(unittest.TestCase):
             try:
                 self.assertEqual(app.fields["channel"].get(), "CH17")
                 self.assertEqual(len(app.monitor_tabs.tabs()), 2)
-                app.ugw.save_dir_var.set(str(ugw_dir))
-                app.ugw.temp_save_dir_var.set(str(temp_dir))
-                app.ugw.tof_dir = str(tof_dir)
+                host = app.ugw
+                self.assertEqual(float(host.temp_interval_var.get()), 10)
+                self.assertEqual(float(host.interval_var.get()), 15)
+                host.save_dir_var.set(str(ugw_dir))
+                host.temp_save_dir_var.set(str(temp_dir))
+                host.tof_dir = str(tof_dir)
+                host.port_var.set("COM5")
+                host.baud_var.set("921600")
+                host.mode_var.set("R")
+                host.channel_vars[2].set(False)
+                host.r_pair_vars[2, 4].set(True)
+                host.interval_var.set("21.5")
+                host.temp_interval_var.set("13.25")
+                host.auto_var.set(True)
+                host.temp_save_var.set(True)
+                host.plot_voltage_var.set(True)
+                host.time_axis_var.set(True)
+                host.display_fs_var.set("4000000")
+                host.timeout_var.set("4.5")
+                saved_preferences = host.get_preferences()
             except Exception:
                 app.destroy()
                 raise
@@ -99,6 +119,15 @@ class AppModeTests(unittest.TestCase):
                 self.assertEqual(app.fields["channel"].get(), "CH17")
                 self.assertEqual(app.ugw.save_dir_var.get(), str(ugw_dir))
                 self.assertEqual(app.ugw.temp_save_dir_var.get(), str(temp_dir))
+                app.monitor_tabs.select(1)
+                app.update_idletasks()
+                host = app.ugw
+                self.assertEqual(host.get_preferences(), saved_preferences)
+                self.assertEqual(host.r_options.winfo_manager(), "pack")
+                self.assertTrue(host.save_check.instate(("disabled",)))
+                self.assertIsNone(host.ser)
+                self.assertIsNone(host.worker)
+                self.assertFalse(host.temp_auto_running)
                 with patch("ugw_host.filedialog.askdirectory", return_value="") as dialog:
                     for action, expected in (
                         (app.ugw.choose_folder, ugw_dir),

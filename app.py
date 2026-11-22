@@ -312,6 +312,7 @@ class MonitorApp(tk.Tk):
             "ugw_save_dir": self.ugw.save_dir_var.get().strip(),
             "temperature_save_dir": self.ugw.temp_save_dir_var.get().strip(),
             "ugw_tof_dir": self.ugw.tof_dir,
+            "serial_preferences": self.ugw.get_preferences(),
         }
         try:
             (ROOT / "settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -336,6 +337,7 @@ class MonitorApp(tk.Tk):
             tof_dir = data.get("ugw_tof_dir")
             if isinstance(tof_dir, str):
                 self.ugw.tof_dir = tof_dir
+            self.ugw.restore_preferences(data.get("serial_preferences"))
         except (OSError, ValueError):
             pass
 

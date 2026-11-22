@@ -366,6 +366,44 @@ class UGWHost:
     # 3. GUI
     # ========================================================
 
+    def _preference_variables(self):
+        return {
+            "port": self.port_var,
+            "baud": self.baud_var,
+            "mode": self.mode_var,
+            "ugw_interval": self.interval_var,
+            "temperature_interval": self.temp_interval_var,
+            "auto_ugw": self.auto_var,
+            "save_mat": self.save_var,
+            "save_temperature_csv": self.temp_save_var,
+            "plot_voltage": self.plot_voltage_var,
+            "use_time_axis": self.time_axis_var,
+            "display_sample_rate": self.display_fs_var,
+            "receive_timeout": self.timeout_var,
+            **{f"m_tx{channel}": variable for channel, variable in self.channel_vars.items()},
+            **{f"r_tx{tx}_rx{rx}": variable for (tx, rx), variable in self.r_pair_vars.items()},
+        }
+
+    def get_preferences(self):
+        return {name: variable.get() for name, variable in self._preference_variables().items()}
+
+    def restore_preferences(self, preferences):
+        if not isinstance(preferences, dict):
+            return
+
+        for name, variable in self._preference_variables().items():
+            value = preferences.get(name)
+            if type(value) is not type(variable.get()) or value == "":
+                continue
+            if name == "port" and value not in self.port_combo["values"]:
+                continue
+            if name == "mode" and value not in ("M", "R"):
+                continue
+            variable.set(value)
+
+        self.update_mode()
+        self.update_auto()
+
     def build_ui(self):
         p = self.px
         configure_panel_styles(self.parent, p)
