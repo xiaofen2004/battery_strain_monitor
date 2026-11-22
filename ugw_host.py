@@ -135,7 +135,7 @@ PANEL_BORDER = "#d8e2ed"
 def configure_panel_styles(parent, px):
     style = ttk.Style(parent)
     style.configure("Monitor.TFrame", background=PANEL_BG)
-    for kind in ("TLabel", "Muted.TLabel", "TCheckbutton", "TRadiobutton"):
+    for kind in ("TLabel", "Muted.TLabel", "Section.TLabel", "TCheckbutton", "TRadiobutton"):
         style.configure(f"Monitor.{kind}", background=PANEL_BG)
     for kind in ("TCheckbutton", "TRadiobutton"):
         style.map(f"Monitor.{kind}", background=[("disabled", PANEL_BG), ("!disabled", PANEL_BG)])
@@ -143,10 +143,6 @@ def configure_panel_styles(parent, px):
                     lightcolor=PANEL_BORDER, darkcolor=PANEL_BORDER, relief="solid", borderwidth=1)
     style.configure("Monitor.TLabelframe.Label", background=PANEL_BG, foreground="#172b4d",
                     font=("Microsoft YaHei UI", 10, "bold"))
-    style.configure("Monitor.TNotebook", background=PANEL_BG, lightcolor=PANEL_BG,
-                    darkcolor=PANEL_BG, bordercolor=PANEL_BG, borderwidth=0)
-    style.configure("Monitor.TNotebook.Tab", padding=(px(9), px(4)))
-    style.map("Monitor.TNotebook.Tab", background=[("selected", PANEL_BG), ("!selected", "#edf2f7")])
     for kind in ("TButton", "Primary.TButton"):
         style.configure(f"Monitor.{kind}", padding=(px(7), px(4)))
 
@@ -450,12 +446,11 @@ class UGWHost:
 
     def _build_ugw_settings(self, panel):
         p = self.px
-        config = ttk.Notebook(panel, style="Monitor.TNotebook")
-        config.pack(fill=tk.BOTH, expand=True)
-        mode = ttk.Frame(config, style="Monitor.TFrame", padding=(p(4), p(6)))
-        display = ttk.Frame(config, style="Monitor.TFrame", padding=(p(4), p(6)))
-        config.add(mode, text="采集模式")
-        config.add(display, text="波形设置")
+        mode = ttk.Frame(panel, style="Monitor.TFrame", padding=p(4))
+        mode.pack(fill=tk.X)
+        ttk.Label(mode, text="采集模式", style="Monitor.Section.TLabel").pack(
+            anchor=tk.W, pady=(0, p(5))
+        )
 
         choices = ttk.Frame(mode, style="Monitor.TFrame")
         choices.pack(fill=tk.X, pady=(0, p(6)))
@@ -503,19 +498,25 @@ class UGWHost:
         self._button(pair_buttons, "全选", self.select_all_r_pairs).pack(side=tk.LEFT, padx=(0, p(5)))
         self._button(pair_buttons, "清空", self.clear_r_pairs).pack(side=tk.LEFT)
 
+        ttk.Separator(panel).pack(fill=tk.X, pady=p(8))
+        display = ttk.Frame(panel, style="Monitor.TFrame", padding=p(4))
+        display.pack(fill=tk.X)
+        ttk.Label(display, text="波形设置", style="Monitor.Section.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, p(5))
+        )
         for column, (label, variable) in enumerate((
             ("显示电压", self.plot_voltage_var), ("使用时间轴 / μs", self.time_axis_var),
         )):
             ttk.Checkbutton(
                 display, text=label, variable=variable, command=self.plot_latest, style="Monitor.TCheckbutton",
-            ).grid(row=0, column=column * 2, columnspan=2, sticky=tk.W)
+            ).grid(row=1, column=column * 2, columnspan=2, sticky=tk.W)
         for index, (label, variable, state) in enumerate((
             ("显示采样率 / Hz", self.display_fs_var, "normal"),
             ("接收超时 / s", self.timeout_var, "normal"),
             ("ADC 位数", self.bits_var, "readonly"),
             ("参考电压 / V", self.vref_var, "readonly"),
         )):
-            row, column = 1 + index // 2, 2 * (index % 2)
+            row, column = 2 + index // 2, 2 * (index % 2)
             ttk.Label(display, text=label, style="Monitor.TLabel").grid(
                 row=row, column=column, sticky=tk.W, padx=(0, p(4)), pady=p(3)
             )
@@ -524,7 +525,7 @@ class UGWHost:
             )
         ttk.Label(
             display, text="显示采样率只影响绘图时间轴。", style="Monitor.Muted.TLabel",
-        ).grid(row=3, column=0, columnspan=4, sticky=tk.W)
+        ).grid(row=4, column=0, columnspan=4, sticky=tk.W)
 
     def _build_temperature_controls(self, panel):
         p = self.px
