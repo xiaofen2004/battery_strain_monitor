@@ -14,3 +14,4 @@ python-dateutil==4.0.0
 scipy==1.18.1
 tzdata==2026.6
 xlrd==2.0.2
+pyserial==3.5

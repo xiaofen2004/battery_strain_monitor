@@ -117,13 +117,15 @@ class ScrollArea(ttk.Frame):
 
     def bind_scrolling(self):
         def wheel(event, axis):
-            if isinstance(event.widget, str) or event.widget.winfo_class() in ("Text", "Listbox"):
+            if (isinstance(event.widget, str) or not self.winfo_ismapped()
+                    or not str(event.widget).startswith(str(self) + ".")
+                    or event.widget.winfo_class() in ("Text", "Listbox")):
                 return
             view = self.canvas.xview if axis == "x" else self.canvas.yview
             if view() != (0.0, 1.0):
                 view("scroll", -int(event.delta / 120) if abs(event.delta) >= 120 else (-1 if event.delta > 0 else 1), "units")
-        self.bind_all("<MouseWheel>", lambda e: wheel(e, "y"))
-        self.bind_all("<Shift-MouseWheel>", lambda e: wheel(e, "x"))
+        self.bind_all("<MouseWheel>", lambda e: wheel(e, "y"), add="+")
+        self.bind_all("<Shift-MouseWheel>", lambda e: wheel(e, "x"), add="+")
 
 
 class ScrollPanel(ttk.Frame):

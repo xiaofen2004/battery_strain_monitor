@@ -1,9 +1,11 @@
 """窗口控件与读取流程检查；不保存用户配置，不占用实际采集设备。"""
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import app as monitor
 from app import MonitorApp
 
 
@@ -65,6 +67,46 @@ class AppModeTests(unittest.TestCase):
                 canvas = app.scroll_area.canvas
                 self.assertGreater(canvas.winfo_width(), app.winfo_width() // 2)
                 self.assertGreater(canvas.winfo_height(), app.winfo_height() // 2)
+            finally:
+                app.destroy()
+
+
+    def test_serial_monitor_restores_independent_output_directories(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(monitor, "ROOT", Path(folder)):
+            root = Path(folder)
+            temp_dir, ugw_dir, tof_dir = (root / name for name in ("温度记录", "超声采集", "历史超声"))
+            for directory in (temp_dir, ugw_dir, tof_dir):
+                directory.mkdir()
+            (root / "settings.json").write_text(
+                json.dumps({"channel": "CH17"}, ensure_ascii=False), encoding="utf-8"
+            )
+            app = MonitorApp()
+            app.withdraw()
+            try:
+                self.assertEqual(app.fields["channel"].get(), "CH17")
+                self.assertEqual(len(app.monitor_tabs.tabs()), 2)
+                app.ugw.save_dir_var.set(str(ugw_dir))
+                app.ugw.temp_save_dir_var.set(str(temp_dir))
+                app.ugw.tof_dir = str(tof_dir)
+            except Exception:
+                app.destroy()
+                raise
+            app._close()
+
+            app = MonitorApp()
+            app.withdraw()
+            try:
+                self.assertEqual(app.fields["channel"].get(), "CH17")
+                self.assertEqual(app.ugw.save_dir_var.get(), str(ugw_dir))
+                self.assertEqual(app.ugw.temp_save_dir_var.get(), str(temp_dir))
+                with patch("ugw_host.filedialog.askdirectory", return_value="") as dialog:
+                    for action, expected in (
+                        (app.ugw.choose_folder, ugw_dir),
+                        (app.ugw.choose_temp_folder, temp_dir),
+                        (app.ugw.analyze_tof_folder, tof_dir),
+                    ):
+                        action()
+                        self.assertEqual(dialog.call_args.kwargs["initialdir"], str(expected))
             finally:
                 app.destroy()
 

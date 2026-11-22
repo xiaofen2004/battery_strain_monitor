@@ -8,14 +8,15 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from data_io import StrainReader, BatteryReader
 from processing import Settings, make_plot_data
 from plotting import draw_plot
 from exporting import export_frame
-from ui_helpers import enable_high_dpi, apply_theme
+from ui_helpers import ScrollArea, enable_high_dpi, apply_theme
 from ui_layout import build_ui
+from ugw_host import UGWHost
 
 ROOT = Path(__file__).resolve().parent
 
@@ -24,7 +25,7 @@ class MonitorApp(tk.Tk):
     def __init__(self):
         enable_high_dpi()
         super().__init__()
-        self.title("电池实验监测 · 应变与电参数")
+        self.title("电池实验监测")
         screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
         self.ui_scale = self.winfo_fpixels("1i") / 96
         self.px = apply_theme(self, self.ui_scale)
@@ -50,14 +51,26 @@ class MonitorApp(tk.Tk):
         self.config_auto_hidden = False
         self.bind("<Configure>", self._window_resized)
         self.protocol("WM_DELETE_WINDOW", self._close)
-        self.after(120, self._poll)
+        self.poll_job = self.after(120, self._poll)
 
     def var(self, name, default=""):
         self.fields[name] = tk.StringVar(value=default)
         return self.fields[name]
 
     def _ui(self):
-        build_ui(self)
+        self.monitor_tabs = ttk.Notebook(self)
+        self.monitor_tabs.pack(fill="both", expand=True)
+        strain_tab = ttk.Frame(self.monitor_tabs)
+        serial_tab = ttk.Frame(self.monitor_tabs)
+        self.monitor_tabs.add(strain_tab, text="应变与电参数")
+        self.monitor_tabs.add(serial_tab, text="温度与超声")
+        build_ui(self, strain_tab)
+
+        ugw_area = ScrollArea(serial_tab, lambda: self.ugw.minimum_size())
+        ugw_area.pack(fill="both", expand=True)
+        self.ugw = UGWHost(ugw_area.body)
+        ugw_area.watch(ugw_area.body)
+        ugw_area.bind_scrolling()
 
     def _browse(self, name):
         path = filedialog.askopenfilename(title="选择" + ("应变" if name == "strain_file" else "电池") + "数据",
@@ -229,7 +242,7 @@ class MonitorApp(tk.Tk):
             except ValueError:
                 self.auto.set(False)
                 self.status.set("自动刷新间隔须为 1～86400 秒。")
-        self.after(120, self._poll)
+        self.poll_job = self.after(120, self._poll)
 
     def _finish(self):
         import time
@@ -287,24 +300,49 @@ class MonitorApp(tk.Tk):
             messagebox.showerror("导出失败", str(exc))
 
     def _save_settings(self, values):
+        settings = values | {
+            "ugw_save_dir": self.ugw.save_dir_var.get().strip(),
+            "temperature_save_dir": self.ugw.temp_save_dir_var.get().strip(),
+            "ugw_tof_dir": self.ugw.tof_dir,
+        }
         try:
-            (ROOT / "settings.json").write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
+            (ROOT / "settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             pass
 
     def _load_settings(self):
         try:
             data = json.loads((ROOT / "settings.json").read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
             for k, value in data.items():
                 if k in self.fields:
                     self.fields[k].set(value)
+            for key, field in (
+                ("ugw_save_dir", self.ugw.save_dir_var),
+                ("temperature_save_dir", self.ugw.temp_save_dir_var),
+            ):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    field.set(value)
+            tof_dir = data.get("ugw_tof_dir")
+            if isinstance(tof_dir, str):
+                self.ugw.tof_dir = tof_dir
         except (OSError, ValueError):
             pass
 
     def _close(self):
-        self.cancel_event.set()
         self._save_settings({k: v.get() for k, v in self.fields.items()})
         self.destroy()
+
+    def destroy(self):
+        self.cancel_event.set()
+        self.after_cancel(self.poll_job)
+        if self.busy_job is not None:
+            self.after_cancel(self.busy_job)
+        self.ugw.shutdown()
+        self.update_idletasks()
+        super().destroy()
 
 
 if __name__ == "__main__":

@@ -16,17 +16,17 @@ class ChartToolbar(NavigationToolbar2Tk):
                  for name, tip, image, method in NavigationToolbar2Tk.toolitems]
 
 
-def build_ui(app):
+def build_ui(app, parent):
     p = app.px
-    app.columnconfigure(0, weight=1)
-    app.rowconfigure(0, weight=1)
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(0, weight=1)
     def min_size():
         rows = app.plot_rows()
         plot = p(220) if rows == 1 else rows * p(120)
         controls = app.right_panel.winfo_reqheight() if hasattr(app, "right_panel") else p(260)
         return p(600) + (p(342) if app.config_visible else 0), controls + p(24) + p(200) + plot
 
-    app.scroll_area = ScrollArea(app, min_size)
+    app.scroll_area = ScrollArea(parent, min_size)
     app.scroll_area.grid(row=0, column=0, sticky="nsew")
     app.scroll_area.body.columnconfigure(0, weight=1)
     app.scroll_area.body.rowconfigure(0, weight=1)
