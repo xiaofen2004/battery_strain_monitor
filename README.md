@@ -40,9 +40,10 @@ py -m venv .venv
 
 ### 构建免安装 EXE
 
+打包与日常运行共用 `.venv`，只需额外安装一次 PyInstaller：
+
 ```powershell
-py -m venv .build-venv
-.\.build-venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+.\.venv\Scripts\python.exe -m pip install pyinstaller==6.22.3
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
