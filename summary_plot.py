@@ -30,7 +30,10 @@ def draw_summary(figure, data, selection, time_axis, layout):
         return False
 
     scale = SCALES.get(time_axis, 1)
-    origin = data.origin
+    lower = min(trace.time[0] for trace in traces.values()) if len(selected) != len(data.steps) else data.origin
+    upper = max(trace.time[-1] for trace in traces.values())
+    origin = data.origin if time_axis == "绝对时间" else lower
+    origin_label = "共同起点" if origin == data.origin else "绘图起点"
     split = layout == "分开绘制"
     axes = list(figure.subplots(len(traces) if split else 1, 1, sharex=True, squeeze=False)[:, 0])
     curves = []
@@ -82,8 +85,6 @@ def draw_summary(figure, data, selection, time_axis, layout):
         else:
             append_curves(base, key, "温度 / °C", trace.values, ["#bc4225", "#e07c30", "#8f4222"], 0)
 
-    lower = min(trace.time[0] for trace in traces.values()) if len(selected) != len(data.steps) else origin
-    upper = max(trace.time[-1] for trace in traces.values())
     plotted_kinds = set()
     for axis in axes:
         for step in selected:
@@ -114,9 +115,9 @@ def draw_summary(figure, data, selection, time_axis, layout):
         xaxis.xaxis.set_major_formatter(FuncFormatter(lambda value, _: elapsed_clock(value)))
         xaxis.set_xlabel("相对时间（时:分:秒）")
     else:
-        xaxis.set_xlabel(f"与共同起点的时间差 / {time_axis}")
+        xaxis.set_xlabel(f"与{origin_label}的时间差 / {time_axis}")
 
-    figure.suptitle(f"共同起点  {clock_text(origin)}", x=.5, y=.98, fontsize=10, color="#334155")
+    figure.suptitle(f"{origin_label}  {clock_text(origin)}", x=.5, y=.98, fontsize=10, color="#334155")
     legend = curves + [Patch(facecolor=STEP_COLORS[kind], label=kind) for kind in STEP_COLORS if kind in plotted_kinds]
     figure.legend(handles=legend, ncol=min(5, len(legend)), loc="upper center", bbox_to_anchor=(.5, .94),
                   frameon=False, fontsize=8, columnspacing=1.2)

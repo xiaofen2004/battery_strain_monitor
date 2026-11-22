@@ -252,6 +252,22 @@ class SummaryTests(unittest.TestCase):
             self.assertTrue(draw_summary(figure, summary, {1, 3}, "绝对时间", "同图叠加"))
             self.assertEqual(len(figure.axes), 4)
             self.assertEqual(figure.axes[0].get_xlabel(), "绝对时间")
+
+            for unit, scale in (("s", 1), ("min", 60), ("h", 3600), ("相对时间", 1)):
+                with self.subTest(unit=unit):
+                    self.assertTrue(draw_summary(figure, summary, {2, 4}, unit, "分开绘制"))
+                    axis = figure.axes[0]
+                    line = axis.lines[0]
+                    self.assertEqual(axis.get_xlim()[0], 0)
+                    self.assertIn(0, axis.get_xticks())
+                    np.testing.assert_allclose(line.get_xdata()[np.isfinite(line.get_ydata())],
+                                               np.r_[0:4, 9:14] / scale)
+                    self.assertTrue(np.isnan(line.get_ydata()).any())
+            self.assertEqual(figure.axes[2].xaxis.get_major_formatter()(0), "00:00:00")
+            self.assertTrue(draw_summary(figure, summary, {2, 4}, "绝对时间", "同图叠加"))
+            axis = figure.axes[0]
+            self.assertEqual(axis.get_xlim()[0], 2)
+            self.assertEqual(axis.xaxis.get_major_formatter()(2), "2026-11-22\n12:00:06")
             self.assertFalse(draw_summary(figure, summary, set(), "min", "分开绘制"))
             temp_only = load_summary({"temperature": temperature})
             self.assertTrue(draw_summary(figure, temp_only, set(), "相对时间", "同图叠加"))
