@@ -182,9 +182,95 @@ class ReaderTests(unittest.TestCase):
         self.assertAlmostEqual(t[1] - t[0], 1)
         self.assertGreater(t[0], 1_700_000_000)
 
+    def test_battery_clock_keeps_pauses_when_fixing_a_later_rollback(self):
+        from datetime import datetime, timedelta
+        import openpyxl
+        from data_io import BatteryReader
+        from summary_data import work_steps
+
+        start = datetime(2026, 11, 20, 17)
+        absolute = [0, 1, 2, 7132, 7133, 7225, 7226, 7227, 7226, 7227]
+        elapsed = [0, 1, 2, 3, 4, 4, 5, 6, 7, 8]
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "battery.xlsx"
+            book = openpyxl.Workbook()
+            record = book.active
+            record.title = "record"
+            record.append(("绝对时间", "总时间", "电压(V)", "电流(A)", "工步类型"))
+            for t, e in zip(absolute, elapsed):
+                record.append((start + timedelta(seconds=t), f"00:00:{e:02}", 3.7, 1, "恒流充电"))
+            book.save(path)
+            reader = BatteryReader()
+            for mode in ("prefer_absolute", "auto"):
+                with self.subTest(mode=mode):
+                    battery = reader.update(path, mode)
+                    np.testing.assert_array_equal(battery.time - battery.time[0], absolute[:8] + [7228, 7229])
+                    self.assertTrue(battery.used_elapsed)
+                    self.assertEqual(len(work_steps(battery)[0].windows), 3)
+            with self.assertRaisesRegex(ValueError, "倒退"):
+                reader.update(path, "absolute")
+
+    def test_battery_clock_treats_an_isolated_forward_stamp_as_an_error(self):
+        from data_io import battery_elapsed_clock
+
+        corrected, gaps = battery_elapsed_clock(np.array([0., 1., 7200., 3., 4.]), np.arange(5.),
+                                                prefer_absolute=True)
+        self.assertEqual(gaps, 0)
+        np.testing.assert_array_equal(corrected, np.arange(5.))
 
 
 class SummaryTests(unittest.TestCase):
+    def test_export_aligns_columns_and_preserves_duplicate_battery_times(self):
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        import pandas as pd
+        from exporting import summary_export_frame, write_summary_export
+        from summary_data import SummaryData, Trace, WorkStep
+
+        origin = datetime(2026, 11, 23, 12, tzinfo=timezone.utc).timestamp()
+        steps = [
+            WorkStep(1, "搁置", 0, 1, origin, origin, ((origin, origin + 1),)),
+            WorkStep(2, "充电", 1, 3, origin + 1, origin + 2, ((origin + 1, origin + 2),)),
+            WorkStep(3, "放电", 3, 5, origin + 2, origin + 3, ((origin + 2, origin + 4),)),
+        ]
+        data = SummaryData(origin, {
+            "battery": Trace(origin + np.array([0, 1, 2, 2, 3]),
+                             {"电压": np.array([1, 2, 3, 4, 5.]), "电流": np.ones(5)}),
+            "strain": Trace(origin + np.array([1., 2.5, 2.5]),
+                            {"CH05": np.array([10., np.nan, 11.])}),
+            "temperature": Trace(origin + np.array([2.5, 3]),
+                                 {"查表温度": np.array([23., 24.])}),
+            "ultrasound": Trace(origin + np.array([2.123456, 3]),
+                                {"Tx1 → Rx4": np.array([.2, .3])}),
+        }, steps, "Δ 微应变 / με")
+        result = summary_export_frame(data, {1, 2, 3}, "绝对时间")
+        boundary = result[result["相对时间 / s"] == 2]
+        self.assertEqual(boundary["工步序号"].tolist(), [2, 3])
+        self.assertEqual(boundary["电压 / V"].tolist(), [3., 4.])
+        self.assertEqual(len(result[result["相对时间 / s"] == 2.5]), 1)
+        selected = summary_export_frame(data, {3}, "min")
+        np.testing.assert_allclose(selected["相对时间 / s"], [0., .123456, .5, 1.], atol=3e-7)
+        np.testing.assert_allclose(selected["相对时间 / min"], selected["相对时间 / s"] / 60)
+        self.assertEqual(selected["工步序号"].tolist(), [3] * 4)
+        self.assertEqual(selected["绝对时间"][1], "2026-11-23 12:00:02.123456")
+        self.assertEqual(selected["ΔCH05 / με"][2], 11.)
+        self.assertEqual(selected["查表温度 / °C"][2], 23.)
+        self.assertEqual(selected["Tx1 → Rx4 相对 ToF / μs"][1], .2)
+        self.assertTrue(np.isnan(selected["查表温度 / °C"][1]))
+        with self.assertRaisesRegex(ValueError, "没有可导出"):
+            summary_export_frame(data, set(), "s")
+
+        with tempfile.TemporaryDirectory() as folder, patch("exporting.EXCEL_DATA_ROWS", 3):
+            csv = Path(folder) / "绘图数据.csv"
+            excel = csv.with_suffix(".xlsx")
+            self.assertEqual(write_summary_export(csv, data, {3}, "min"), 4)
+            self.assertEqual(write_summary_export(excel, data, {3}, "min"), 4)
+            self.assertTrue(csv.read_bytes().startswith(b"\xef\xbb\xbf"))
+            from_csv = pd.read_csv(csv, encoding="utf-8-sig")
+            sheets = pd.read_excel(excel, sheet_name=None)
+            self.assertEqual(list(sheets), ["汇总数据", "汇总数据 2"])
+            pd.testing.assert_frame_equal(from_csv, pd.concat(sheets.values(), ignore_index=True), check_dtype=False)
+
     def test_three_clocks_and_step_selection_use_real_intervals(self):
         from datetime import datetime, timedelta
         import openpyxl

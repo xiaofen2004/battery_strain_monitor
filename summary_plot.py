@@ -8,7 +8,7 @@ from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 from plotting import STAGE_COLORS, battery_line, clock_text, display_points
 from processing import stage_kind
-from summary_data import visible_traces
+from summary_data import summary_plot_start, visible_traces
 
 TIME_AXES = ("s", "min", "h", "绝对时间", "相对时间")
 PLOT_LAYOUTS = ("分开绘制", "同图叠加")
@@ -33,7 +33,7 @@ def draw_summary(figure, data, selection, time_axis, layout):
         return False
 
     scale = SCALES.get(time_axis, 1)
-    lower = min(trace.time[0] for trace in traces.values()) if len(selected) != len(data.steps) else data.origin
+    lower = summary_plot_start(data, traces, selected)
     upper = max(trace.time[-1] for trace in traces.values())
     origin = data.origin if time_axis == "绝对时间" else lower
     origin_label = "共同起点" if origin == data.origin else "绘图起点"

@@ -3,11 +3,12 @@ from pathlib import Path
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from exporting import write_summary_export
 from plotting import clock_text
 from summary_data import latest_temperature_file, load_summary
 from summary_plot import PLOT_LAYOUTS, TIME_AXES, draw_summary, elapsed_clock
@@ -33,7 +34,9 @@ class SummaryPage:
         self.status = tk.StringVar(master=parent, value="选择已保存的数据文件或超声 MAT 文件夹，读取后可筛选电池工步。")
         self.defaults = {}
         self.data = None
+        self.loaded_paths = ()
         self.checked_steps = set()
+        self.has_plot = False
         self.step_icons = parent.winfo_toplevel().checkbutton_images[:2]
         self.events = queue.Queue()
         self.cancel = threading.Event()
@@ -91,8 +94,12 @@ class SummaryPage:
         ttk.Label(options, text="仅用于只有相对秒数的旧温度 CSV", style="Muted.TLabel").grid(
             row=4, column=1, sticky="w", pady=(p(2), 0)
         )
-        self.read_button = ttk.Button(options, text="读取并绘图", style="Primary.TButton", command=self.read_files)
-        self.read_button.grid(row=5, column=0, columnspan=2, sticky="e", pady=(p(5), 0))
+        actions = ttk.Frame(options, style="Card.TFrame")
+        actions.grid(row=5, column=0, columnspan=2, sticky="e", pady=(p(5), 0))
+        self.export_button = ttk.Button(actions, text="导出绘图数据", command=self.export_data, state="disabled")
+        self.export_button.pack(side="left", padx=(0, p(6)))
+        self.read_button = ttk.Button(actions, text="读取并绘图", style="Primary.TButton", command=self.read_files)
+        self.read_button.pack(side="left")
 
         split = ttk.Panedwindow(outer, orient="horizontal")
         split.grid(row=1, column=0, sticky="nsew")
@@ -184,7 +191,7 @@ class SummaryPage:
             for key, button in self.included.items():
                 if button.get():
                     value = self.files[key].get().strip()
-                    path = Path(value).expanduser()
+                    path = Path(value).expanduser().resolve()
                     if key == "ultrasound":
                         if not value or not path.is_dir():
                             raise ValueError("请选择有效的超声 MAT 文件夹。")
@@ -200,6 +207,7 @@ class SummaryPage:
             return
 
         self.read_button.state(["disabled"])
+        self._update_export_button()
         self.status.set("读取采集文件…")
         threading.Thread(target=self._read, args=(paths, cfg, self.temperature_start.get().strip(), selection),
                          daemon=True).start()
@@ -213,7 +221,53 @@ class SummaryPage:
         except Exception as exc:
             self.events.put(("error", str(exc)))
         else:
-            self.events.put(("loaded", data))
+            self.events.put(("loaded", (data, tuple(paths.values()))))
+
+    def _update_export_button(self):
+        enabled = self.has_plot and self.read_button.instate(["!disabled"])
+        self.export_button.state(["!disabled" if enabled else "disabled"])
+
+    def export_data(self):
+        if self.export_button.instate(["disabled"]):
+            return
+        csv_type, excel_type = "CSV 文件", "Excel 工作簿"
+        file_type = tk.StringVar(master=self.parent, value=csv_type)
+        filename = filedialog.asksaveasfilename(
+            parent=self.parent, title="导出汇总绘图数据", initialfile="汇总绘图数据",
+            filetypes=[(csv_type, "*.csv"), (excel_type, "*.xlsx")], typevariable=file_type,
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        add_extension = not path.suffix
+        if add_extension:
+            path = path.with_suffix(".xlsx" if file_type.get() == excel_type else ".csv")
+        try:
+            resolved = path.resolve()
+            inputs = {Path(field.get().strip()).expanduser().resolve()
+                      for field in self.files.values() if field.get().strip()}
+            if resolved in inputs or resolved in self.loaded_paths:
+                raise ValueError("不能覆盖源数据文件。请选择其他文件名。")
+            if add_extension and path.exists() and not messagebox.askyesno(
+                "替换文件", f"是否替换已有的 {path.name}？", parent=self.parent
+            ):
+                return
+        except (OSError, ValueError) as exc:
+            self.status.set(f"导出失败：{exc}")
+            return
+        self.read_button.state(["disabled"])
+        self._update_export_button()
+        self.status.set("正在导出汇总绘图数据…")
+        threading.Thread(target=self._export, args=(path, self.data, set(self.checked_steps), self.time_axis.get()),
+                         daemon=True).start()
+
+    def _export(self, path, data, selection, time_axis):
+        try:
+            rows = write_summary_export(path, data, selection, time_axis)
+        except Exception as exc:
+            self.events.put(("export_error", str(exc)))
+        else:
+            self.events.put(("exported", f"已导出 {rows:,} 行 · {path}"))
 
     def poll(self):
         while True:
@@ -225,18 +279,25 @@ class SummaryPage:
                 self.status.set(value)
                 continue
             self.read_button.state(["!disabled"])
+            self._update_export_button()
+            if kind == "exported":
+                self.status.set(value)
+                continue
+            if kind == "export_error":
+                self.status.set(f"导出失败：{value}")
+                continue
             if kind == "error":
                 self.status.set(f"读取失败：{value}")
                 continue
-            self.data = value
+            self.data, self.loaded_paths = value
             for item in self.steps.get_children():
                 self.steps.delete(item)
-            for step in value.steps:
+            for step in self.data.steps:
                 self.steps.insert("", "end", iid=str(step.number),
                                   values=(step.number, step.name, clock_text(step.start)[:19],
                                           clock_text(step.last)[:19], elapsed_clock(step.last - step.start)),
-                                  tags=("before",) if step.last < value.origin else ())
-            control_state = "normal" if value.steps else "disabled"
+                                  tags=("before",) if step.last < self.data.origin else ())
+            control_state = "normal" if self.data.steps else "disabled"
             self.all_button.configure(state=control_state)
             self.clear_button.configure(state=control_state)
             self._set_all_steps(True)
@@ -283,6 +344,8 @@ class SummaryPage:
         self.draw_job = None
         selected = self.checked_steps
         drawn = draw_summary(self.figure, self.data, selected, self.time_axis.get(), self.layout.get())
+        self.has_plot = drawn
+        self._update_export_button()
         self.toolbar.update()
         self.canvas.draw_idle()
         start = f"共同起点 {clock_text(self.data.origin)}"
@@ -292,7 +355,7 @@ class SummaryPage:
         if self.data.strain_rate_note:
             start += f"  ·  {self.data.strain_rate_note}"
         if self.data.battery_clock_rebuilt:
-            start += "  ·  电池绝对时间有倒退，已按首条时间＋总时间重建"
+            start += "  ·  电池时间倒退已分段校正，保留记录间隔"
         if self.data.ultrasound_note:
             start += f"  ·  {self.data.ultrasound_note}"
         self.status.set(start)

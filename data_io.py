@@ -285,6 +285,33 @@ def battery_step_starts(frame, stages):
     return np.flatnonzero(starts)
 
 
+def battery_elapsed_clock(absolute, elapsed, *, prefer_absolute):
+    """Rebuild from local anchors without collapsing pauses between recordings."""
+    absolute_steps = np.diff(absolute)
+    elapsed_steps = np.diff(elapsed)
+    # Timestamp rounding can move a sample by one second. Split only when
+    # the wall clock jumps well beyond the elapsed interval and sampling cadence.
+    cadences = [np.median(steps[steps > 0]) for steps in (absolute_steps, elapsed_steps)
+                if np.any(steps > 0)]
+    threshold = max(1., 5 * min(cadences, default=0.))
+    extra = absolute_steps - elapsed_steps
+    pauses = extra > threshold
+    # A single timestamp that jumps forward and immediately returns is a bad
+    # reading within a segment, not the first row of a resumed recording.
+    pauses[:-1] &= extra[:-1] + extra[1:] > threshold
+    gaps = np.flatnonzero(pauses) + 1
+    edges = np.r_[0, gaps, absolute.size]
+    result = absolute.copy()
+    for a, b in zip(edges[:-1], edges[1:]):
+        if not prefer_absolute or np.any(absolute_steps[a:b - 1] < 0):
+            result[a:b] = absolute[a] + (elapsed[a:b] - elapsed[a])
+        if a and result[a] < result[a - 1]:
+            # Keep the records ordered if a reconstructed segment reaches
+            # past the timestamp at the start of the next segment.
+            result[a:b] += result[a - 1] + elapsed_steps[a - 1] - result[a]
+    return result, gaps.size
+
+
 class BatteryReader:
     def __init__(self):
         self.key = None
@@ -330,8 +357,9 @@ class BatteryReader:
             elapsed = pd.to_timedelta(frame["总时间"].astype(str), errors="coerce").dt.total_seconds().to_numpy()
             if not np.isfinite(elapsed).all() or np.any(np.diff(elapsed) < 0):
                 raise ValueError("总时间无效或倒退，请检查源文件或选择绝对时间模式。")
-            t = absolute[0] + elapsed - elapsed[0]
-            notes.append(f"电池采用首条绝对时间＋总时间；与原绝对时间最大偏差 {np.max(np.abs(t - absolute)):.3f} s")
+            t, gaps = battery_elapsed_clock(absolute, elapsed, prefer_absolute=mode == "prefer_absolute")
+            notes.append(f"电池按各段起始绝对时间与总时间校正，保留 {gaps} 处记录间隔。"
+                         f"与表内绝对时间的最大偏差 {np.max(np.abs(t - absolute)):.3f} 秒")
         else:
             t = absolute
             if backwards:

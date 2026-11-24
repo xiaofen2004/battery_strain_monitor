@@ -273,7 +273,7 @@ def _join_contiguous(intervals):
     return merged
 
 
-def visible_traces(data, selected_numbers):
+def visible_traces(data, selected_numbers, *, line_breaks=True):
     """Use row bounds for battery and time intervals for the other instruments."""
     selected = [step for step in data.steps if step.number in selected_numbers]
     filtered = len(selected) != len(data.steps)
@@ -298,7 +298,8 @@ def visible_traces(data, selected_numbers):
         else:
             pieces = [np.arange(a, b) for a, b in parts]
             indices = np.concatenate(pieces)
-            breaks = np.cumsum([len(piece) for piece in pieces[:-1]], dtype=int)
+            breaks = (np.cumsum([len(piece) for piece in pieces[:-1]], dtype=int)
+                      if line_breaks else np.empty(0, dtype=int))
         values = {label: column[indices] for label, column in trace.values.items()
                   if np.isfinite(column[indices]).any()}
         if values:
@@ -312,3 +313,9 @@ def visible_traces(data, selected_numbers):
                     masks = {label: np.insert(mask, breaks, True) for label, mask in masks.items()}
             output[key] = Trace(times, values, masks)
     return output, selected
+
+
+def summary_plot_start(data, traces, selected):
+    if len(selected) == len(data.steps):
+        return data.origin
+    return min(trace.time[0] for trace in traces.values())
