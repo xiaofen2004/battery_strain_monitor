@@ -1,16 +1,68 @@
 """窗口控件与读取流程检查；不保存用户配置，不占用实际采集设备。"""
 import json
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import app as monitor
 from app import MonitorApp
 
 
 class AppModeTests(unittest.TestCase):
+    def test_chart_save_controls_use_high_resolution_and_keep_pdf(self):
+        import matplotlib
+        import numpy as np
+        from PIL import Image
+        from plotting import draw_plot
+        from processing import Settings, make_plot_data
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(MonitorApp, "_load_settings"):
+            app = MonitorApp()
+            app.withdraw()
+            try:
+                root = Path(folder)
+                cfg = Settings(strain_hz=1, output_hz=1, cutoff_hz=0, median_points=1, include_battery=False)
+                app.plot_data = make_plot_data(np.arange(7.), np.arange(7.) ** 2, None, cfg)
+                draw_plot(app.plot_data, app.figure)
+                app.figure.axes[0].set_xlim(.02, .07)
+                main_png = root / "应变.png"
+                with patch("tkinter.filedialog.asksaveasfilename", return_value=str(main_png)):
+                    app.save_image()
+                with Image.open(main_png) as saved:
+                    self.assertEqual(saved.size, (7200, 3600))
+                    self.assertAlmostEqual(saved.info["dpi"][0], 600, places=1)
+                self.assertEqual(app.figure.axes[0].get_xlim(), (.02, .07))
+
+                def choose_pdf(**kwargs):
+                    kwargs["typevariable"].set("PDF 矢量图")
+                    return str(root / "矢量")
+
+                with patch("tkinter.filedialog.asksaveasfilename", side_effect=choose_pdf):
+                    app.save_image()
+                self.assertEqual((root / "矢量.pdf").read_bytes()[:5], b"%PDF-")
+
+                summary = app.summary_page
+                summary.figure.clear()
+                summary.figure.set_size_inches(3, 2, forward=False)
+                summary.figure.add_subplot().plot([0, 1], [1, 2])
+                with matplotlib.rc_context():
+                    initial_dpi = matplotlib.rcParams["savefig.dpi"]
+                    for extension in ("png", "pdf"):
+                        output = root / f"汇总.{extension}"
+                        with patch("tkinter.filedialog.asksaveasfilename", return_value=str(output)):
+                            self.assertEqual(summary.toolbar.save_figure(), str(output))
+                    self.assertEqual(matplotlib.rcParams["savefig.dpi"], initial_dpi)
+                    self.assertEqual(Path(matplotlib.rcParams["savefig.directory"]), root)
+                with Image.open(root / "汇总.png") as saved:
+                    self.assertGreaterEqual(saved.width, 3200)
+                    self.assertGreaterEqual(saved.info["dpi"][0], 600)
+                self.assertEqual((root / "汇总.pdf").read_bytes()[:5], b"%PDF-")
+            finally:
+                app.destroy()
+
     def test_strain_only_does_not_require_or_read_battery(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(MonitorApp, "_load_settings"):
             path = Path(folder) / "strain.xls"
@@ -71,6 +123,77 @@ class AppModeTests(unittest.TestCase):
             finally:
                 app.destroy()
 
+
+    def test_ugw_power_buttons_are_visible_and_use_original_serial_commands(self):
+        link = Mock(is_open=True)
+        link.write.side_effect = len
+        ports = [SimpleNamespace(device="COM3")]
+        with (patch.object(MonitorApp, "_load_settings"),
+              patch("ugw_host.list_ports.comports", return_value=ports),
+              patch("ugw_host.serial.Serial", return_value=link)):
+            app = MonitorApp()
+            host = app.ugw
+            try:
+                app.monitor_tabs.select(1)
+                app.update()
+                self.assertTrue(host.power_on_button.winfo_ismapped())
+                self.assertTrue(host.power_off_button.winfo_ismapped())
+                self.assertLess(host.power_panel.winfo_y(), host.control_grid.winfo_y())
+                self.assertTrue(host.power_on_button.instate(["disabled"]))
+                self.assertIn("连接 STM32", host.power_status_var.get())
+
+                host.connect_button.invoke()
+                host.auto_var.set(False)
+                host.update_auto()
+                self.assertTrue(host.temp_once_button.instate(["!disabled"]))
+                self.assertTrue(host.once_button.instate(["disabled"]))
+                host.temp_auto_running = True
+                host.update_buttons()
+                self.assertTrue(host.power_on_button.instate(["disabled"]))
+                self.assertIn("先停止温度定时采集", host.power_status_var.get())
+                host.power_on_button.invoke()
+                link.write.assert_not_called()
+                host.temp_auto_running = False
+                host.update_buttons()
+
+                def wait_for_power():
+                    deadline = time.monotonic() + 3
+
+                    def check():
+                        if host.power_busy and time.monotonic() < deadline:
+                            app.after(20, check)
+                        else:
+                            app.quit()
+
+                    app.after(20, check)
+                    app.mainloop()
+                    self.assertFalse(host.power_busy)
+
+                host.power_on_button.invoke()
+                wait_for_power()
+                self.assertIs(host.power_enabled, True)
+                self.assertIn("已发送 v", host.power_status_var.get())
+                self.assertTrue(host.once_button.instate(["!disabled"]))
+                with patch("ugw_host.messagebox.askyesno", return_value=False):
+                    host.power_off_button.invoke()
+                link.write.assert_called_once_with(b"v")
+                with patch("ugw_host.messagebox.askyesno", return_value=True):
+                    host.power_off_button.invoke()
+                    wait_for_power()
+                self.assertEqual(link.write.call_args_list, [call(b"v"), call(b"0")])
+                self.assertIs(host.power_enabled, False)
+                self.assertTrue(host.once_button.instate(["disabled"]))
+                self.assertTrue(host.temp_once_button.instate(["!disabled"]))
+
+                link.write.side_effect = lambda _: 0
+                with patch("ugw_host.messagebox.showerror") as error:
+                    host.power_on_button.invoke()
+                    wait_for_power()
+                self.assertIsNone(host.power_enabled)
+                error.assert_called_once_with("电源控制错误", "串口未完整发送电源指令。")
+                self.assertTrue(host.once_button.instate(["disabled"]))
+            finally:
+                app.destroy()
 
     def test_serial_monitor_restores_settings_and_independent_output_directories(self):
         ports = [SimpleNamespace(device="COM3"), SimpleNamespace(device="COM5")]

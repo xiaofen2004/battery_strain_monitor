@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from data_io import StrainReader, BatteryReader
 from processing import Settings, make_plot_data
-from plotting import draw_plot
+from plotting import chart_export_dpi, draw_plot
 from exporting import export_frame
 from ui_helpers import ScrollArea, enable_high_dpi, apply_theme
 from ui_layout import build_ui
@@ -301,19 +301,28 @@ class MonitorApp(tk.Tk):
     def save_image(self):
         if self.plot_data is None:
             return messagebox.showinfo("保存图片", "请先读取并绘图。")
-        path = filedialog.asksaveasfilename(defaultextension=".png", initialfile="电池应变_电压_电流.png",
-                                           filetypes=[("PNG 图片", "*.png"), ("PDF 图像", "*.pdf")])
-        if path:
-            try:
-                self._safe_output(path)
-                export_figure = draw_plot(self.plot_data)
-                for source_axis, target_axis in zip(self.figure.axes, export_figure.axes):
-                    target_axis.set_xlim(source_axis.get_xlim())
-                    target_axis.set_ylim(source_axis.get_ylim())
-                export_figure.savefig(path, dpi=240, facecolor="white")
-                self.status.set("图片已保存：" + path)
-            except Exception as exc:
-                messagebox.showerror("保存失败", str(exc))
+        file_type = tk.StringVar(self, value="高清 PNG 图片")
+        filename = filedialog.asksaveasfilename(parent=self, initialfile="电池应变_电压_电流",
+                                               filetypes=[("高清 PNG 图片", "*.png"), ("PDF 矢量图", "*.pdf")],
+                                               typevariable=file_type)
+        if not filename:
+            return
+        try:
+            path = Path(filename)
+            add_suffix = not path.suffix
+            if add_suffix:
+                path = path.with_suffix(".pdf" if file_type.get() == "PDF 矢量图" else ".png")
+            self._safe_output(path)
+            if add_suffix and path.exists() and not messagebox.askyesno("替换文件", f"是否替换已有的 {path.name}？", parent=self):
+                return
+            export_figure = draw_plot(self.plot_data)
+            for source_axis, target_axis in zip(self.figure.axes, export_figure.axes):
+                target_axis.set_xlim(source_axis.get_xlim())
+                target_axis.set_ylim(source_axis.get_ylim())
+            export_figure.savefig(path, dpi=chart_export_dpi(export_figure), facecolor="white")
+            self.status.set(f"图片已保存：{path}")
+        except Exception as exc:
+            messagebox.showerror("保存失败", str(exc))
 
     def export_data(self):
         if self.plot_data is None:

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from math import ceil, floor
 import numpy as np
 import matplotlib
 from matplotlib.figure import Figure
@@ -9,6 +10,12 @@ from matplotlib.transforms import ScaledTranslation
 matplotlib.rcParams.update({"font.sans-serif": ["Microsoft YaHei", "SimHei", "DejaVu Sans"],
                             "axes.unicode_minus": False, "font.size": 10})
 STAGE_COLORS = {"放电": "#fbe1e1", "充电": "#dff2e1", "搁置": "#eeeeee"}
+
+
+def chart_export_dpi(figure):
+    """Render sharply even when the current figure is small on a high-DPI screen."""
+    width, height = figure.get_size_inches()
+    return max(1, min(max(600, ceil(3200 / width)), floor(10000 / max(width, height))))
 
 
 def clock_text(epoch):

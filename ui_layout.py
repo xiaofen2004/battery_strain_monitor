@@ -1,19 +1,28 @@
 """左侧设置、右侧图表的自适应桌面布局。"""
 import tkinter as tk
 from tkinter import ttk
+import matplotlib
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from ui_helpers import ScrollArea, ScrollPanel
-from plotting import fit_bottom_margin
+from plotting import chart_export_dpi, fit_bottom_margin
 
 TOOL_TIPS = {"Home": "回到完整视图", "Back": "上一个视图", "Forward": "下一个视图",
              "Pan": "平移：左键拖动平移，右键拖动缩放坐标轴", "Zoom": "缩放：左键框选放大，右键框选缩小",
-             "Subplots": "调整边距与子图间距", "Save": "按当前屏幕显示保存图像"}
+             "Subplots": "调整边距与子图间距", "Save": "保存高清图片，保留当前缩放范围"}
 
 
 class ChartToolbar(NavigationToolbar2Tk):
     toolitems = [(name, TOOL_TIPS.get(name, tip), image, method)
                  for name, tip, image, method in NavigationToolbar2Tk.toolitems]
+
+    def save_figure(self, *args):
+        with matplotlib.rc_context({"savefig.dpi": chart_export_dpi(self.canvas.figure)}):
+            path = super().save_figure(*args)
+            directory = matplotlib.rcParams["savefig.directory"]
+        if path and directory:
+            matplotlib.rcParams["savefig.directory"] = directory
+        return path
 
 
 def build_ui(app, parent):

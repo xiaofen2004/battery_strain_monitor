@@ -29,6 +29,15 @@ class WorkStep:
     windows: tuple[tuple[float, float], ...]
 
 
+@dataclass(frozen=True)
+class WorkStepPoints:
+    step: WorkStep
+    source: str
+    series: str
+    # First, last, minimum and maximum finite sample, in this order.
+    samples: tuple[tuple[float, float], ...]
+
+
 @dataclass
 class SummaryData:
     origin: float
@@ -303,6 +312,9 @@ def visible_traces(data, selected_numbers, *, line_breaks=True):
         values = {label: column[indices] for label, column in trace.values.items()
                   if np.isfinite(column[indices]).any()}
         if values:
+            if key == "strain" and data.strain_label.startswith("Δ"):
+                values = {label: column - column[np.isfinite(column).argmax()]
+                          for label, column in values.items()}
             times = time[indices]
             masks = ({label: trace.sample_mask[label][indices] for label in values}
                      if trace.sample_mask is not None else None)
@@ -313,6 +325,34 @@ def visible_traces(data, selected_numbers, *, line_breaks=True):
                     masks = {label: np.insert(mask, breaks, True) for label, mask in masks.items()}
             output[key] = Trace(times, values, masks)
     return output, selected
+
+
+def work_step_points(data, traces, selected):
+    """Find per-step points in the visible data before reducing points for display."""
+    points = []
+    for step in selected:
+        for source, visible in traces.items():
+            if source == "battery":
+                # A boundary timestamp can belong to two successive battery rows.
+                trace = data.traces[source]
+                lower = np.searchsorted(trace.time, data.origin)
+                indices = slice(max(lower, step.first_row), step.past_last_row)
+            else:
+                trace = visible
+                bounds = np.searchsorted(trace.time, step.windows)
+                indices = (slice(*bounds[0]) if len(bounds) == 1
+                           else np.concatenate([np.arange(start, stop) for start, stop in bounds]))
+            time = trace.time[indices]
+            for label in visible.values:
+                values = trace.values[label][indices]
+                valid = np.flatnonzero(np.isfinite(values))
+                if not valid.size:
+                    continue
+                measured = values[valid]
+                chosen = valid[[0, -1, np.argmin(measured), np.argmax(measured)]]
+                samples = tuple((float(time[i]), float(values[i])) for i in chosen)
+                points.append(WorkStepPoints(step, source, label, samples))
+    return points
 
 
 def summary_plot_start(data, traces, selected):

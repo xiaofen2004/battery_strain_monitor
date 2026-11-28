@@ -327,9 +327,7 @@ class UGWHost:
             value="温度：尚未采集"
         )
 
-        self.power_status_var = tk.StringVar(
-            value="UGW电源：状态未知"
-        )
+        self.power_status_var = tk.StringVar()
 
         self.build_ui()
 
@@ -395,6 +393,12 @@ class UGWHost:
         serial_panel = ttk.LabelFrame(self.layout, text="串口连接", style="Monitor.TLabelframe", padding=p(8))
         serial_panel.pack(fill=tk.X, pady=(0, p(7)))
         self._build_serial_bar(serial_panel)
+
+        self.power_panel = ttk.LabelFrame(
+            self.layout, text="UGW 电源控制", style="Monitor.TLabelframe", padding=p(8)
+        )
+        self.power_panel.pack(fill=tk.X, pady=(0, p(7)))
+        self._build_power_controls(self.power_panel)
 
         self.control_grid = ttk.Frame(self.layout)
         self.control_grid.pack(fill=tk.X)
@@ -573,18 +577,18 @@ class UGWHost:
         self._button(storage, "选择目录", self.choose_temp_folder).pack(side=tk.LEFT)
         ttk.Label(panel, textvariable=self.temp_status_var, style="Monitor.Muted.TLabel").pack(anchor=tk.W)
 
+    def _build_power_controls(self, panel):
+        p = self.px
+        self.power_on_button = self._button(panel, "打开 UGW 电源 (v)", self.turn_on_ugw_power, primary=True)
+        self.power_on_button.grid(row=0, column=0, sticky=tk.W, padx=(0, p(5)))
+        self.power_off_button = self._button(panel, "停止 UGW 并关闭电源 (0)", self.turn_off_ugw_power)
+        self.power_off_button.grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(panel, textvariable=self.power_status_var, style="Monitor.Muted.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, pady=(p(5), 0)
+        )
+
     def _build_ugw_controls(self, panel):
         p = self.px
-        power = ttk.Frame(panel, style="Monitor.TFrame")
-        power.pack(fill=tk.X)
-        self.power_on_button = self._button(power, "打开 UGW 电源", self.turn_on_ugw_power)
-        self.power_on_button.pack(side=tk.LEFT, padx=(0, p(5)))
-        self.power_off_button = self._button(power, "停止并关电源", self.turn_off_ugw_power)
-        self.power_off_button.pack(side=tk.LEFT)
-        ttk.Label(power, textvariable=self.power_status_var, style="Monitor.Muted.TLabel").pack(
-            side=tk.LEFT, padx=(p(7), 0)
-        )
-        ttk.Separator(panel).pack(fill=tk.X, pady=(p(6), p(3)))
         storage = ttk.Frame(panel, style="Monitor.TFrame", padding=(0, p(2)))
         storage.pack(fill=tk.X)
         storage.columnconfigure(1, weight=1)
@@ -800,10 +804,6 @@ class UGWHost:
 
             self.power_enabled = None
 
-            self.power_status_var.set(
-                "UGW电源：状态未知，请发送 v"
-            )
-
             self.connection_var.set(
                 f"已连接：{port} @ {baud}"
             )
@@ -869,10 +869,6 @@ class UGWHost:
         self.ser = None
 
         self.power_enabled = None
-
-        self.power_status_var.set(
-            "UGW电源：状态未知"
-        )
 
         self.connection_var.set(
             "未连接"
@@ -1058,7 +1054,8 @@ class UGWHost:
                     "串口连接已经失效。"
                 )
 
-            ser.write(command)
+            if ser.write(command) != len(command):
+                raise RuntimeError("串口未完整发送电源指令。")
 
             ser.flush()
 
@@ -3508,21 +3505,11 @@ class UGWHost:
                     command = event[2]
 
                     if command == "v":
-
-                        self.power_status_var.set(
-                            "已发送 v（硬件状态未确认）"
-                        )
-
                         self.log(
                             "已发送 UGW 电源开启指令 v。"
                         )
 
                     elif command == "0":
-
-                        self.power_status_var.set(
-                            "已发送 0（停止并关闭）"
-                        )
-
                         self.log(
                             "已发送全局停止及电源关闭指令 0。"
                         )
@@ -3530,10 +3517,6 @@ class UGWHost:
                 elif kind == "power_error":
 
                     self.power_enabled = None
-
-                    self.power_status_var.set(
-                        "UGW电源：状态未知"
-                    )
 
                     self.log(
                         "电源控制错误：" + event[1]
@@ -3723,6 +3706,26 @@ class UGWHost:
             idle
             and not temp_busy
         )
+
+        if not connected:
+            power_status = "请先连接 STM32"
+        elif self.power_busy:
+            power_status = "正在发送电源指令…"
+        else:
+            power_status = {
+                None: "电源状态未知",
+                True: "已发送 v（硬件状态未确认）",
+                False: "已发送 0（停止并关闭）",
+            }[self.power_enabled]
+            if self.temp_auto_running and busy:
+                power_status += " · 先停止超声和温度定时采集"
+            elif self.temp_auto_running:
+                power_status += " · 先停止温度定时采集"
+            elif busy or self.temp_active:
+                power_status += " · 请等待采集结束"
+            elif not powered:
+                power_status += " · 采集超声前请打开电源"
+        self.power_status_var.set(power_status)
 
         self.connect_button.configure(
             state=(

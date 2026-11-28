@@ -253,7 +253,7 @@ class SummaryTests(unittest.TestCase):
         np.testing.assert_allclose(selected["相对时间 / min"], selected["相对时间 / s"] / 60)
         self.assertEqual(selected["工步序号"].tolist(), [3] * 4)
         self.assertEqual(selected["绝对时间"][1], "2026-11-23 12:00:02.123456")
-        self.assertEqual(selected["ΔCH05 / με"][2], 11.)
+        self.assertEqual(selected["ΔCH05 / με"][2], 0.)
         self.assertEqual(selected["查表温度 / °C"][2], 23.)
         self.assertEqual(selected["Tx1 → Rx4 相对 ToF / μs"][1], .2)
         self.assertTrue(np.isnan(selected["查表温度 / °C"][1]))
@@ -270,6 +270,60 @@ class SummaryTests(unittest.TestCase):
             sheets = pd.read_excel(excel, sheet_name=None)
             self.assertEqual(list(sheets), ["汇总数据", "汇总数据 2"])
             pd.testing.assert_frame_equal(from_csv, pd.concat(sheets.values(), ignore_index=True), check_dtype=False)
+
+    def test_step_points_use_selected_samples_and_rebased_strain(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from matplotlib.text import Text
+        from summary_data import SummaryData, Trace, WorkStep, visible_traces, work_step_points
+        from summary_plot import draw_summary
+
+        steps = [
+            WorkStep(1, "搁置", 0, 2, 0., 1., ((0., 2.),)),
+            WorkStep(2, "充电", 2, 5, 2., 4., ((2., 4.),)),
+            WorkStep(3, "放电", 5, 8, 4., 6., ((4., 7.),)),
+        ]
+        strain = Trace(np.array([0., 1., 2.25, 3., 4.25, 5., 6.]),
+                       {"CH05": np.array([7., 12., 22., 19., 24., 32., 29.]),
+                        "CH11": np.array([9., 8., 40., 43., 36., np.nan, 35.])})
+        battery = Trace(np.array([0., 1., 2., 3., 4., 4., 5., 6.]),
+                        {"电压": np.array([1., 1., 2., 5., 6., 4., 1., 2.]),
+                         "电流": np.ones(8)})
+        data = SummaryData(0., {"strain": strain, "battery": battery}, steps, "Δ 微应变 / με")
+        selected = {2, 3}
+        visible, work = visible_traces(data, selected)
+        np.testing.assert_equal(visible["strain"].values["CH05"], [0., -3., 2., 10., 7.])
+        self.assertEqual(visible["strain"].values["CH11"][0], 0.)
+        points = work_step_points(data, visible, work)
+        sample = {(p.step.number, p.series): p.samples for p in points}
+        self.assertEqual(sample[2, "CH05"], ((2.25, 0.), (3., -3.), (3., -3.), (2.25, 0.)))
+        self.assertEqual(sample[2, "电压"][:2], ((2., 2.), (4., 6.)))
+        self.assertEqual(sample[3, "电压"][:2], ((4., 4.), (6., 2.)))
+        self.assertEqual(sample[3, "CH11"][1], (6., -5.))
+        self.assertEqual(sample[3, "CH05"][3], (5., 10.))
+        self.assertNotIn((1, "CH05"), sample)
+
+        other_selection, _ = visible_traces(data, {3})
+        np.testing.assert_equal(other_selection["strain"].values["CH05"], [0., 8., 5.])
+        raw, _ = visible_traces(replace(data, strain_label="应变 / με"), {3})
+        self.assertEqual(raw["strain"].values["CH05"][0], 24.)
+        self.assertEqual(strain.values["CH05"][2], 22.)
+
+        figure = Figure()
+        for layout in ("分开绘制", "同图叠加"):
+            self.assertTrue(draw_summary(figure, data, selected, "s", layout,
+                                         visible=(visible, work), special_points=points))
+            strain_axis = figure.axes[0]
+            np.testing.assert_allclose(strain_axis.collections[0].get_offsets()[0], [.25, 0.])
+            self.assertEqual(len(strain_axis.collections), 8)
+            with patch("summary_plot.Text", wraps=Text) as label:
+                FigureCanvasAgg(figure).draw()
+            self.assertTrue({"0", "-3", "10"} <= {entry.args[2] for entry in label.call_args_list})
+            self.assertTrue(draw_summary(figure, data, selected, "s", layout))
+            self.assertEqual(len(figure.axes[0].collections), 0)
+            self.assertFalse(figure.artists)
 
     def test_three_clocks_and_step_selection_use_real_intervals(self):
         from datetime import datetime, timedelta

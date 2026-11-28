@@ -3,15 +3,15 @@ from pathlib import Path
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from exporting import write_summary_export
 from plotting import clock_text
-from summary_data import latest_temperature_file, load_summary
-from summary_plot import PLOT_LAYOUTS, TIME_AXES, draw_summary, elapsed_clock
+from summary_data import latest_temperature_file, load_summary, visible_traces, work_step_points
+from summary_plot import PLOT_LAYOUTS, STEP_POINT_HEADINGS, TIME_AXES, draw_summary, elapsed_clock
 from ui_helpers import ScrollArea
 from ui_layout import ChartToolbar
 
@@ -37,6 +37,7 @@ class SummaryPage:
         self.loaded_paths = ()
         self.checked_steps = set()
         self.has_plot = False
+        self.point_window = None
         self.step_icons = parent.winfo_toplevel().checkbutton_images[:2]
         self.events = queue.Queue()
         self.cancel = threading.Event()
@@ -116,6 +117,8 @@ class SummaryPage:
         self.clear_button.pack(side="right")
         self.all_button = ttk.Button(step_header, text="全选", command=lambda: self._set_all_steps(True), state="disabled")
         self.all_button.pack(side="right", padx=p(5))
+        self.points_button = ttk.Button(step_header, text="显示特殊点", command=self._toggle_points, state="disabled")
+        self.points_button.pack(side="right")
         ttk.Label(steps, text="勾选要绘制的工步。时长按完整工步计算。", style="Muted.TLabel").grid(
             row=1, column=0, sticky="w", pady=(0, p(5))
         )
@@ -340,11 +343,129 @@ class SummaryPage:
         if self.data is not None and self.draw_job is None:
             self.draw_job = self.parent.after_idle(self._render)
 
+    def _toggle_points(self):
+        if self.point_window is not None:
+            self._close_points()
+            return
+        p = self.px
+        window = self.point_window = tk.Toplevel(self.parent)
+        window.title("工步特殊点")
+        window.configure(background="#edf2f7")
+        width = min(p(690), window.winfo_screenwidth() - p(35))
+        height = min(p(435), window.winfo_screenheight() - p(70))
+        window.geometry(f"{width}x{height}")
+        window.minsize(min(width, p(475)), min(height, p(275)))
+        window.protocol("WM_DELETE_WINDOW", self._close_points)
+        body = ttk.Frame(window, padding=p(10))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        card = ttk.Frame(body, style="Card.TFrame", padding=p(7))
+        card.grid(row=0, column=0, sticky="nsew")
+        card.columnconfigure(0, weight=1)
+        card.rowconfigure(1, weight=1)
+        self.point_count = ttk.Label(card, style="Muted.TLabel")
+        self.point_count.grid(row=0, column=0, sticky="w", padx=p(3), pady=(0, p(5)))
+
+        font = ("Microsoft YaHei UI", 10)
+        line_height = tkfont.Font(window, font=font).metrics("linespace")
+        style = ttk.Style(window)
+        style.configure("Points.Treeview", font=font, rowheight=max(p(27), line_height + p(8)),
+                        background="white", fieldbackground="white", borderwidth=0)
+        style.configure("Points.Treeview.Heading", background="#eef3f9", foreground="#253b54",
+                        borderwidth=0, relief="flat", padding=(p(6), p(5)))
+        style.map("Points.Treeview", background=[("selected", "#dbeafe")],
+                  foreground=[("selected", "#173565")])
+        columns = ("start", "end", "minimum", "maximum")
+        table = self.point_table = ttk.Treeview(card, columns=columns, style="Points.Treeview", selectmode="browse")
+        table.heading("#0", text="工步 / 曲线", anchor="w")
+        table.column("#0", width=p(210), minwidth=p(130), anchor="w")
+        for column, title in zip(columns, STEP_POINT_HEADINGS):
+            table.heading(column, text=title, anchor="e")
+            table.column(column, width=p(107), minwidth=p(65), anchor="e")
+        table.tag_configure("group", background="#e9f0f8", foreground="#23466a",
+                            font=("Microsoft YaHei UI", 10, "bold"))
+        table.tag_configure("alternate", background="#f6f8fc")
+        table.grid(row=1, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(card, orient="vertical", command=table.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        table.configure(yscrollcommand=scrollbar.set)
+        table.bind("<<TreeviewSelect>>", self._show_point_times)
+
+        details = ttk.Frame(body, style="Card.TFrame", padding=p(10))
+        details.grid(row=1, column=0, sticky="ew", pady=(p(7), 0))
+        self.point_detail = ttk.Label(details, style="Section.TLabel")
+        self.point_detail.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, p(6)))
+        self.point_times = []
+        for i, title in enumerate(STEP_POINT_HEADINGS):
+            details.columnconfigure(i, weight=1, uniform="point")
+            ttk.Label(details, text=title, style="Muted.TLabel").grid(row=1, column=i, sticky="w")
+            stamp = ttk.Label(details)
+            stamp.grid(row=2, column=i, sticky="w", pady=(p(2), 0))
+            self.point_times.append(stamp)
+        self.point_rows = {}
+        self.points_button.configure(text="隐藏特殊点")
+        self._request_render()
+
+    def _close_points(self):
+        self.point_window.destroy()
+        self.point_window = None
+        self.points_button.configure(text="显示特殊点")
+        self._request_render()
+
+    def _show_point_rows(self, points):
+        table = self.point_table
+        previous = table.selection()
+        children = table.get_children()
+        expanded = {item: bool(int(table.item(item, "open"))) for item in children}
+        if children:
+            table.delete(*children)
+        self.point_rows = {}
+        units = {"strain": "με", "temperature": "°C", "ultrasound": "μs"}
+        groups = {}
+        for record in points:
+            group = f"step{record.step.number}"
+            if group not in groups:
+                table.insert("", "end", iid=group, text=f"工步 {record.step.number}  ·  {record.step.name}",
+                             tags=("group",), open=expanded.get(group, True))
+                groups[group] = 0
+            unit = units.get(record.source, "V" if record.series == "电压" else "A")
+            iid = f"{group}/{record.source}/{record.series}"
+            values = tuple(f"{value:.8g}" for _, value in record.samples)
+            table.insert(group, "end", iid=iid, text=f"{record.series} / {unit}", values=values,
+                         tags=("alternate",) if groups[group] % 2 else ())
+            self.point_rows[iid] = record
+            groups[group] += 1
+        self.point_count.configure(text=f"{len(groups)} 个工步 · {len(points)} 组曲线数据")
+        if self.point_rows:
+            if previous and table.exists(previous[0]):
+                table.selection_set(previous[0])
+                table.see(previous[0])
+            else:
+                table.selection_set(next(iter(self.point_rows)))
+                table.yview_moveto(0)
+        self._show_point_times()
+
+    def _show_point_times(self, _event=None):
+        selection = self.point_table.selection()
+        row = self.point_rows.get(selection[0]) if selection else None
+        title = f"测点时间 · 工步 {row.step.number} · {row.series}" if row else "选择一条曲线查看测点时间"
+        self.point_detail.configure(text=title)
+        for label, sample in zip(self.point_times, row.samples if row else (None,) * 4):
+            label.configure(text=clock_text(sample[0]).replace(" ", "\n") if sample else "—")
+
     def _render(self):
         self.draw_job = None
         selected = self.checked_steps
-        drawn = draw_summary(self.figure, self.data, selected, self.time_axis.get(), self.layout.get())
+        view = visible_traces(self.data, selected)
+        points = work_step_points(self.data, *view) if self.point_window is not None else ()
+        drawn = draw_summary(self.figure, self.data, selected, self.time_axis.get(), self.layout.get(),
+                             visible=view, special_points=points)
         self.has_plot = drawn
+        self.points_button.state(["!disabled" if self.point_window is not None or (drawn and selected) else "disabled"])
+        if self.point_window is not None:
+            self._show_point_rows(points)
         self._update_export_button()
         self.toolbar.update()
         self.canvas.draw_idle()

@@ -47,5 +47,17 @@
     "r_tx4_rx1": false,
     "r_tx4_rx2": false,
     "r_tx4_rx3": false
+  },
+  "summary_preferences": {
+    "paths": {},
+    "included": {
+      "strain": true,
+      "battery": true,
+      "temperature": true,
+      "ultrasound": false
+    },
+    "axis": "min",
+    "layout": "分开绘制",
+    "temperature_start": ""
   }
 }
